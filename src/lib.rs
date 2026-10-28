@@ -5,3 +5,4 @@ pub mod hash;
 pub mod index;
 pub mod dat;
 pub mod schema;
+pub mod mesh;

@@ -58,6 +58,37 @@ impl<'a> Reader<'a> {
 }
 
 impl Index {
+    /// Visit every matching file, reading each bundle only once. Failures to
+    /// read a bundle are reported to `f` as errors for each affected file.
+    pub fn for_each_file(
+        &self,
+        dir: &Path,
+        mut pred: impl FnMut(&str) -> bool,
+        mut f: impl FnMut(&str, Result<&[u8]>),
+    ) {
+        let mut by_bundle: HashMap<u32, Vec<(&String, &FileRecord)>> = HashMap::new();
+        for (p, r) in &self.paths {
+            if r.size > 0 && pred(p) {
+                by_bundle.entry(r.bundle).or_default().push((p, r));
+            }
+        }
+        for (b, files) in by_bundle {
+            let name = &self.bundles[b as usize].name;
+            let data = std::fs::read(dir.join(format!("{name}.bundle.bin")))
+                .map_err(anyhow::Error::from)
+                .and_then(|raw| bundle::decompress(&raw));
+            for (p, r) in files {
+                match &data {
+                    Ok(d) => match d.get(r.offset as usize..(r.offset + r.size) as usize) {
+                        Some(bytes) => f(p, Ok(bytes)),
+                        None => f(p, Err(anyhow::anyhow!("record exceeds bundle"))),
+                    },
+                    Err(e) => f(p, Err(anyhow::anyhow!("{e:#}"))),
+                }
+            }
+        }
+    }
+
     /// Read one file's bytes out of its bundle, decompressing only the blocks
     /// that cover it. `dir` is the `Bundles2` directory.
     pub fn read_file(&self, dir: &Path, path: &str) -> Result<Vec<u8>> {
