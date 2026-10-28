@@ -13,6 +13,8 @@ pub struct ShapeTex {
     pub img: RgbaImage,
     /// Treat the alpha channel as cut-out transparency.
     pub alpha_test: bool,
+    /// Helper material that must not be drawn.
+    pub invisible: bool,
 }
 
 /// Material path for each shape. `.fmt` files name them directly; for `.smd`
@@ -48,9 +50,12 @@ pub fn load_shape_textures(idx: &Index, dir: &Path, mesh_path: &str, mesh: &Mesh
             return None;
         }
         let m = material::parse(&idx.read_file(dir, mat).ok()?).ok()?;
+        if m.invisible {
+            return Some(ShapeTex { img: RgbaImage::new(1, 1), alpha_test: false, invisible: true });
+        }
         let dds = Dds::read(&mut Cursor::new(idx.read_file(dir, &m.albedo?).ok()?)).ok()?;
         let img = image_dds::image_from_dds(&dds, 0).ok()?;
-        Some(ShapeTex { img, alpha_test: !m.opaque })
+        Some(ShapeTex { img, alpha_test: !m.opaque, invisible: false })
     };
     shape_materials(idx, dir, mesh_path, mesh).iter().map(|m| load(m)).collect()
 }

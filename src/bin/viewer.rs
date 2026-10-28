@@ -319,7 +319,8 @@ impl Renderer {
                         wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
                     ],
                 });
-                Draw { first_index: shape.first_index, index_count: shape.index_count, bind }
+                let hidden = tex.as_ref().is_some_and(|t| t.invisible);
+                Draw { first_index: shape.first_index, index_count: if hidden { 0 } else { shape.index_count }, bind }
             })
             .collect();
 

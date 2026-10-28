@@ -13,6 +13,8 @@ pub struct Material {
     /// False when the alpha channel of the colour texture means transparency
     /// (cut-out/blended graphs); true for graphs that reuse it as a mask.
     pub opaque: bool,
+    /// Shadow-only or fully transparent helper materials are never drawn.
+    pub invisible: bool,
 }
 
 fn decode_text(b: &[u8]) -> Result<String> {
@@ -32,7 +34,10 @@ pub fn parse(bytes: &[u8]) -> Result<Material> {
     let v: Value = serde_json::from_str(&decode_text(bytes)?).context("material is not valid JSON")?;
     let mut graph = String::new();
     let mut albedo = None;
+    let mut invisible = false;
     for inst in v["graphinstances"].as_array().into_iter().flatten() {
+        let parent = inst["parent"].as_str().unwrap_or("").to_ascii_lowercase();
+        invisible |= parent.contains("shadowonly") || parent.contains("transparentobjects");
         if graph.is_empty() {
             graph = inst["parent"].as_str().unwrap_or("").to_string();
         }
@@ -65,5 +70,5 @@ pub fn parse(bytes: &[u8]) -> Result<Material> {
             .map(str::to_string);
     }
     let opaque = graph.to_ascii_lowercase().contains("opaque");
-    Ok(Material { albedo, graph, opaque })
+    Ok(Material { albedo, graph, opaque, invisible })
 }
