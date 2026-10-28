@@ -493,7 +493,7 @@ struct App {
 /// Load `list[pos]` into the renderer and describe it in the window title.
 fn show(idx: &Index, dir: &std::path::Path, list: &[String], pos: usize, renderer: &mut Renderer, window: &Window) {
     let path = &list[pos];
-    let result = idx.read_file(dir, path).and_then(|d| mesh::parse(path, &d));
+    let result = model::load_mesh(idx, dir, path);
     match result {
         Ok(mesh) => {
             let tex = model::load_shape_textures(idx, dir, path, &mesh);
@@ -631,7 +631,7 @@ fn main() -> Result<()> {
     let mut list: Vec<String> = match a[2].strip_prefix('@') {
         Some(filter) => {
             let f = filter.to_ascii_lowercase();
-            idx.paths.keys().filter(|p| (p.ends_with(".fmt") || p.ends_with(".smd")) && p.contains(&f)).cloned().collect()
+            idx.paths.keys().filter(|p| (p.ends_with(".fmt") || p.ends_with(".smd") || p.ends_with(".tgt")) && p.contains(&f)).cloned().collect()
         }
         None => vec![a[2].clone()],
     };
@@ -658,8 +658,7 @@ fn main() -> Result<()> {
         let out = a.get(i + 1).context("--screenshot needs an output path")?;
         let yaw: f32 = a.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(30.0f32);
         let path = &list[start];
-        let data = idx.read_file(&dir, path)?;
-        let mesh = mesh::parse(path, &data).with_context(|| format!("parsing {path}"))?;
+        let mesh = model::load_mesh(&idx, &dir, path).with_context(|| format!("loading {path}"))?;
         let textures = model::load_shape_textures(&idx, &dir, path, &mesh);
         println!(
             "{path}: {} triangles, {} shapes, {} textured",

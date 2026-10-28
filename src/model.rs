@@ -54,3 +54,32 @@ pub fn load_shape_textures(idx: &Index, dir: &Path, mesh_path: &str, mesh: &Mesh
     };
     shape_materials(idx, dir, mesh_path, mesh).iter().map(|m| load(m)).collect()
 }
+
+/// Load any supported geometry: a model (`.fmt`, `.smd`) or a whole terrain tile (`.tgt`).
+pub fn load_mesh(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
+    use anyhow::Context;
+    if !path.ends_with(".tgt") {
+        return crate::mesh::parse(path, &idx.read_file(dir, path)?);
+    }
+    let tgt = crate::terrain::parse_tgt(&idx.read_file(dir, path)?)?;
+    let mut out = Mesh::default();
+    let mut bbox: Option<[f32; 6]> = None;
+    for col in 1..=tgt.size.0 {
+        for row in 1..=tgt.size.1 {
+            let file = format!("{}_c{col}r{row}.tgm", tgt.mesh_root);
+            let tgm = crate::terrain::parse_tgm(&idx.read_file(dir, &file).with_context(|| file.clone())?)
+                .with_context(|| file.clone())?;
+            let b = tgm.main.bbox;
+            bbox = Some(match bbox {
+                None => b,
+                Some(a) => [a[0].min(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].max(b[3]), a[4].min(b[4]), a[5].max(b[5])],
+            });
+            // tgt lists sub-tiles from the top row down, columns left to right.
+            let line = ((tgt.size.1 - row) * tgt.size.0 + (col - 1)) as usize;
+            let slots = tgt.subtile_runs.get(line).map(|r| crate::terrain::expand_runs(r)).unwrap_or_default();
+            crate::terrain::append(&mut out, &tgm.main, &slots, &tgt.materials);
+        }
+    }
+    out.bbox = bbox.unwrap_or_default();
+    Ok(out)
+}

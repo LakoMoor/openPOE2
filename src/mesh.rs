@@ -26,30 +26,30 @@ pub struct Mesh {
     pub bbox: [f32; 6],
 }
 
-struct Cur<'a> {
-    d: &'a [u8],
-    p: usize,
+pub(crate) struct Cur<'a> {
+    pub(crate) d: &'a [u8],
+    pub(crate) p: usize,
 }
 
 impl<'a> Cur<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let s = self.d.get(self.p..self.p + n).context("unexpected end of mesh file")?;
         self.p += n;
         Ok(s)
     }
-    fn u8(&mut self) -> Result<u8> {
+    pub(crate) fn u8(&mut self) -> Result<u8> {
         Ok(self.take(1)?[0])
     }
-    fn u16(&mut self) -> Result<u16> {
+    pub(crate) fn u16(&mut self) -> Result<u16> {
         Ok(u16::from_le_bytes(self.take(2)?.try_into()?))
     }
-    fn u32(&mut self) -> Result<u32> {
+    pub(crate) fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into()?))
     }
-    fn f32(&mut self) -> Result<f32> {
+    pub(crate) fn f32(&mut self) -> Result<f32> {
         Ok(f32::from_le_bytes(self.take(4)?.try_into()?))
     }
-    fn bbox(&mut self) -> Result<[f32; 6]> {
+    pub(crate) fn bbox(&mut self) -> Result<[f32; 6]> {
         let mut b = [0.0; 6];
         for v in &mut b {
             *v = self.f32()?;
@@ -70,13 +70,12 @@ fn f16(bits: u16) -> f32 {
 }
 
 /// Parse a `DOLm` block, returning LOD 0 and the shape index ranges.
-fn dolm(c: &mut Cur) -> Result<Mesh> {
+pub(crate) fn dolm(c: &mut Cur) -> Result<Mesh> {
     ensure!(c.take(4)? == b"DOLm", "missing DOLm marker");
     let variant = c.u16()?;
     let lods = c.u8()? as usize;
     let shapes = c.u16()? as usize;
     let fmt = c.u32()?;
-    ensure!(lods > 0, "model has no LODs");
 
     let extents: Vec<(u32, u32)> =
         (0..lods).map(|_| Ok((c.u32()?, c.u32()?))).collect::<Result<_>>()?;
@@ -135,7 +134,7 @@ fn dolm(c: &mut Cur) -> Result<Mesh> {
             c.take(4 * shapes)?;
         }
     }
-    if variant == 4 {
+    if variant == 4 && lods > 0 {
         c.take(4)?;
     }
     Ok(out)

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use image::{Rgba, RgbaImage};
 use poe2_bundles::index::Index;
-use poe2_bundles::{mesh, model};
+use poe2_bundles::model;
 
 const SIZE: u32 = 900;
 
@@ -16,8 +16,7 @@ fn main() -> Result<()> {
     let dir = PathBuf::from(&a[1]);
     let yaw: f32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(35.0f32).to_radians();
     let idx = Index::parse(&std::fs::read(dir.join("_.index.bin"))?)?;
-    let data = idx.read_file(&dir, &a[2])?;
-    let m = mesh::parse(&a[2], &data).with_context(|| format!("parsing {}", a[2]))?;
+    let m = model::load_mesh(&idx, &dir, &a[2]).with_context(|| format!("loading {}", a[2]))?;
 
     println!(
         "{}: {} vertices, {} triangles, {} shapes, bbox {:?}",

@@ -9,3 +9,4 @@ pub mod mesh;
 pub mod material;
 pub mod model;
 pub mod sm;
+pub mod terrain;
