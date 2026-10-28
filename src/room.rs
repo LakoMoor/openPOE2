@@ -30,6 +30,7 @@ pub struct KSlot {
     pub row: usize,
     pub w: usize,
     pub h: usize,
+    pub edges: [Option<String>; 4],
     pub grounds: [Option<String>; 4],
     pub heights: [i32; 4],
 }
@@ -141,15 +142,17 @@ fn parse_slots(text: &str, version: u32) -> Option<Vec<KSlot>> {
                     if toks.get(t).is_some_and(|x| x.parse::<i32>().is_ok()) {
                         t += 1;
                     }
-                    let ground = |k: usize| -> Option<String> {
-                        let g = f[14 + k];
+                    let string = |g: i32| -> Option<String> {
                         (g > 0).then(|| strings.get(g as usize - 1).cloned()).flatten()
                     };
+                    let ground = |k: usize| string(f[14 + k]);
+                    let edge = |k: usize| string(f[2 + k]);
                     slots.push(KSlot {
                         col,
                         row,
                         w: f[0].max(1) as usize,
                         h: f[1].max(1) as usize,
+                        edges: [edge(0), edge(1), edge(2), edge(3)],
                         grounds: [ground(0), ground(1), ground(2), ground(3)],
                         heights: [f[18], f[19], f[20], f[21]],
                     });

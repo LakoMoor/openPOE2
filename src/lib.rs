@@ -14,3 +14,4 @@ pub mod room;
 pub mod character;
 pub mod skeleton;
 pub mod ground;
+pub mod tdt;
