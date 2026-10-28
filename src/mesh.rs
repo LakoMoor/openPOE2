@@ -63,7 +63,7 @@ impl<'a> Cur<'a> {
     }
 }
 
-fn f16(bits: u16) -> f32 {
+pub(crate) fn f16(bits: u16) -> f32 {
     let sign = if bits >> 15 == 1 { -1.0 } else { 1.0 };
     let exp = ((bits >> 10) & 0x1f) as i32;
     let man = (bits & 0x3ff) as f32;

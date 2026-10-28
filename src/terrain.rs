@@ -1,9 +1,9 @@
 //! Terrain tiles: a `.tgt` descriptor (UTF-16 text) names a grid of sub-tiles,
 //! each stored as a `.tgm` geometry file.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
-use crate::mesh::{dolm, Cur, Mesh, Shape};
+use crate::mesh::{dolm, f16, Cur, Mesh, Shape};
 
 #[derive(Debug, Clone)]
 pub struct Tgt {
@@ -85,14 +85,73 @@ pub struct Tgm {
     pub ground_slots: Vec<u32>,
 }
 
+/// Versions below 9: sizes up front, then per mesh the shape table, vertices and indices.
+fn parse_tgm_old(c: &mut Cur, version: u8, bbox: [f32; 6]) -> Result<Tgm> {
+    let mut info = [(0usize, 0u32, 0u32); 2];
+    for i in &mut info {
+        *i = (c.u16()? as usize, c.u32()?, c.u32()?);
+    }
+    let vertex_format = c.u8()?;
+    let tail_count = c.u8()? as usize;
+    if version == 8 {
+        c.u32()?;
+    }
+
+    let mut parts = Vec::new();
+    for (is_main, &(shapes, verts, tris)) in [true, false].iter().zip(&info) {
+        let mut extents = Vec::with_capacity(shapes);
+        let mut slots = Vec::with_capacity(shapes);
+        for _ in 0..shapes {
+            slots.push(c.u16()? as u32);
+            c.take(24)?;
+            extents.push((c.u32()?, c.u32()?));
+        }
+        let (mut pos, mut nor, mut uv) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..verts {
+            pos.push([c.f32()?, c.f32()?, c.f32()?]);
+            let n = c.take(4)?;
+            nor.push([n[0] as i8 as f32 / 127.0, n[1] as i8 as f32 / 127.0, n[2] as i8 as f32 / 127.0]);
+            c.take(4)?; // tangent
+            if *is_main {
+                uv.push([f16(c.u16()?), f16(c.u16()?)]);
+            } else {
+                // Ground vertices: format 3 carries two UV sets, format 2 a single unused pair.
+                let mut t = [0.0; 2];
+                if version >= 4 && vertex_format == 3 {
+                    t = [f16(c.u16()?), f16(c.u16()?)];
+                    c.take(4)?;
+                } else if version >= 4 && vertex_format == 2 {
+                    c.take(4)?;
+                }
+                uv.push(t);
+            }
+        }
+        let count = tris as usize * 3;
+        let indices: Vec<u32> = if verts < 0x10000 {
+            (0..count).map(|_| c.u16().map(u32::from)).collect::<Result<_>>()?
+        } else {
+            (0..count).map(|_| c.u32()).collect::<Result<_>>()?
+        };
+        let shapes_out = extents
+            .into_iter()
+            .map(|(first_index, index_count)| Shape { first_index, index_count, ..Default::default() })
+            .collect();
+        parts.push((Mesh { positions: pos, normals: nor, uvs: uv, indices, shapes: shapes_out, bbox, ..Default::default() }, slots));
+    }
+    let _ = tail_count; // trailing entries are not needed
+    let (ground, ground_slots) = parts.pop().unwrap();
+    let (main, main_slots) = parts.pop().unwrap();
+    Ok(Tgm { main, main_slots, ground, ground_slots })
+}
+
 /// Parse a v9+ `.tgm` (the layout used by current content).
 pub fn parse_tgm(data: &[u8]) -> Result<Tgm> {
     let mut c = Cur { d: data, p: 0 };
     let version = c.u8()?;
-    if version < 9 {
-        bail!("tgm version {version} is not supported yet");
-    }
     let bbox = c.bbox()?;
+    if version < 9 {
+        return parse_tgm_old(&mut c, version, bbox);
+    }
     c.u16()?; // shape count
     c.u16()?;
     c.u8()?;
