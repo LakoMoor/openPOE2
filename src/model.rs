@@ -58,6 +58,9 @@ pub fn load_shape_textures(idx: &Index, dir: &Path, mesh_path: &str, mesh: &Mesh
 /// Load any supported geometry: a model (`.fmt`, `.smd`) or a whole terrain tile (`.tgt`).
 pub fn load_mesh(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
     use anyhow::Context;
+    if path.ends_with(".ao") {
+        return load_character(idx, dir, path);
+    }
     if path.ends_with(".arm") {
         return load_room(idx, dir, path);
     }
@@ -114,5 +117,118 @@ fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
     }
     eprintln!("{path}: version {}, {} doodads listed, {placed} placed", r.version, r.doodads.len());
     room::recompute_bbox(&mut out);
+    Ok(out)
+}
+
+/// Load the skinned mesh named by an `.sm` descriptor, with its shapes' materials
+/// taken from `overrides` (by shape name) or else from the descriptor.
+fn load_skin(idx: &Index, dir: &Path, sm_path: &str, overrides: &std::collections::HashMap<String, String>) -> anyhow::Result<Mesh> {
+    let info = sm::parse(&idx.read_file(dir, sm_path)?)?;
+    let mut mesh = crate::mesh::parse(&info.mesh, &idx.read_file(dir, &info.mesh)?)?;
+    let from_sm: Vec<String> =
+        info.materials.iter().flat_map(|(m, n)| std::iter::repeat_n(m.clone(), *n)).collect();
+    for (i, s) in mesh.shapes.iter_mut().enumerate() {
+        s.material = overrides
+            .get(&s.name)
+            .cloned()
+            .or_else(|| from_sm.get(i).cloned())
+            .unwrap_or_default();
+    }
+    Ok(mesh)
+}
+
+/// A character in its rest pose: the base body plus outfit pieces. Outfit pieces
+/// replace the matching base segments (body, gloves, boots); pieces attached to
+/// a bone or socket are moved to that bone's rest position.
+fn load_character(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
+    use crate::character::{parse_ao, Attachment};
+    use crate::skeleton::Skeleton;
+    use glam::{Mat4, Vec3};
+    use std::collections::HashSet;
+
+    let root = parse_ao(&idx.read_file(dir, path)?)?;
+    // Bones and sockets come from the shared character descriptor.
+    let shared = idx.read_file(dir, "metadata/characters/character.ao").ok().and_then(|b| parse_ao(&b).ok());
+    let skeleton = idx
+        .read_file(dir, "art/models/charactersfour/onerig.ast")
+        .ok()
+        .and_then(|b| Skeleton::parse(&b).ok());
+    let sockets = shared.map(|s| s.sockets).unwrap_or_default();
+    let resolve = |name: &str| -> Mat4 {
+        let Some(skel) = &skeleton else { return Mat4::IDENTITY };
+        let mut name = name.to_string();
+        let mut extra = Mat4::IDENTITY;
+        for _ in 0..6 {
+            if let Some(i) = skel.index_of(&name) {
+                return skel.world(i) * extra;
+            }
+            match sockets.get(&name.to_ascii_lowercase()) {
+                Some((parent, t)) if !parent.is_empty() => {
+                    extra = Mat4::from_translation(Vec3::from(*t)) * extra;
+                    name = parent.clone();
+                }
+                _ => break,
+            }
+        }
+        Mat4::IDENTITY
+    };
+
+    // (mesh, is_base, transform)
+    let mut parts: Vec<(Mesh, bool, Mat4)> = Vec::new();
+    if let Some(skin) = &root.skin {
+        parts.push((load_skin(idx, dir, skin, &root.shape_materials)?, true, Mat4::IDENTITY));
+    }
+
+    let mut hidden: HashSet<String> = HashSet::new();
+    let mut queue: Vec<(Attachment, usize, Mat4)> = root
+        .attachments
+        .iter()
+        .map(|a| (a.clone(), 1, if a.bone == "<root>" { Mat4::IDENTITY } else { resolve(&a.bone) }))
+        .collect();
+    while let Some((att, depth, xf)) = queue.pop() {
+        let Ok(bytes) = idx.read_file(dir, &att.path) else { continue };
+        let Ok(ao) = parse_ao(&bytes) else { continue };
+        if let Some(skin) = &ao.skin {
+            if let Ok(m) = load_skin(idx, dir, skin, &ao.shape_materials) {
+                let slot = att.alias.strip_suffix("_Attach").unwrap_or("");
+                if !matches!(slot, "" | "Head" | "Face") {
+                    if let Some(list) = root.segments.get(&format!("{slot}_Seg")) {
+                        // Keep the upper arms: outfit bodies don't cover them.
+                        hidden.extend(list.iter().filter(|n| !n.contains("upperArm")).cloned());
+                    }
+                }
+                parts.push((m, false, xf));
+            }
+        }
+        if depth < 4 {
+            queue.extend(ao.attachments.into_iter().map(|a| {
+                let child = if a.bone == "<root>" { xf } else { xf * resolve(&a.bone) };
+                (a, depth + 1, child)
+            }));
+        }
+    }
+
+    let mut out = Mesh::default();
+    for (mesh, is_base, xf) in &parts {
+        let base = out.positions.len() as u32;
+        out.positions.extend(mesh.positions.iter().map(|p| xf.transform_point3(Vec3::from(*p)).to_array()));
+        out.normals.extend(mesh.normals.iter().map(|n| xf.transform_vector3(Vec3::from(*n)).to_array()));
+        out.uvs.extend_from_slice(&mesh.uvs);
+        let first = out.indices.len() as u32;
+        out.indices.extend(mesh.indices.iter().map(|i| i + base));
+        for s in &mesh.shapes {
+            if *is_base && hidden.contains(&s.name) {
+                continue;
+            }
+            out.shapes.push(crate::mesh::Shape {
+                name: s.name.clone(),
+                material: s.material.clone(),
+                first_index: first + s.first_index,
+                index_count: s.index_count,
+            });
+        }
+    }
+    anyhow::ensure!(!out.positions.is_empty(), "{path}: no skinned mesh found");
+    crate::room::recompute_bbox(&mut out);
     Ok(out)
 }
