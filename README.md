@@ -7,6 +7,14 @@ Path of Exile 2 and aims to run it fully offline. Early development.
 their owners. This repository contains no game content: you need your own installed copy, which is
 only ever read. The project never connects to official servers and does not touch anti-cheat.
 
+## Screenshots
+
+Rendered offscreen by `viewer` from a local install (game art belongs to Grinding Gear Games; shown here for documentation of the reimplementation).
+
+| Animated character | Exile Encampment (play mode, textured ground) |
+|---|---|
+| ![character](site/shots/character.png) | ![encampment](site/shots/encampment.png) |
+
 ## What works
 
 - `Bundles2` reader: Oodle (Leviathan) decompression via the pure-Rust `oozextract`, index with ~4.27 M files.

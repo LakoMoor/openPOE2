@@ -55,7 +55,12 @@ pub fn load_shape_textures(idx: &Index, dir: &Path, mesh_path: &str, mesh: &Mesh
             return Some(ShapeTex { img: RgbaImage::new(1, 1), alpha_test: false, invisible: true });
         }
         let dds = Dds::read(&mut Cursor::new(idx.read_file(dir, &m.albedo?).ok()?)).ok()?;
-        let img = image_dds::image_from_dds(&dds, 0).ok()?;
+        let mut img = image_dds::image_from_dds(&dds, 0).ok()?;
+        // Whole terrain tiles reference hundreds of textures; keep them within GPU memory.
+        const MAX_SIDE: u32 = 1024;
+        while img.width().max(img.height()) > MAX_SIDE {
+            img = image::imageops::resize(&img, (img.width() / 2).max(1), (img.height() / 2).max(1), image::imageops::FilterType::Triangle);
+        }
         Some(ShapeTex { img, alpha_test: !m.opaque, invisible: false })
     };
     // Many shapes share a material: decode each one once.
@@ -200,7 +205,8 @@ fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
     } else {
         let ground = AreaGround::load(idx, dir, path);
         // Slots that match a tile of the area get its real geometry; the rest get flat ground.
-        let tiles = area_tiles(idx, dir, path);
+        // Experimental: tile rotation/ground are unverified and it breaks the town, so opt in.
+        let tiles = if std::env::var_os("POE2_TILES").is_some() { area_tiles(idx, dir, path) } else { Vec::new() };
         let mut tile_cache: HashMap<String, Option<Mesh>> = HashMap::new();
         let mut flat = Vec::new();
         let mut tiled = 0;
