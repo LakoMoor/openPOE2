@@ -36,6 +36,8 @@ pub struct Index {
     /// File path -> record. Paths are lower-case-agnostic: keys are stored as
     /// they appear in the path table.
     pub paths: HashMap<String, FileRecord>,
+    /// `.sm` descriptors grouped by directory (path without trailing slash).
+    pub sm_by_dir: HashMap<String, Vec<String>>,
 }
 
 struct Reader<'a> {
@@ -166,7 +168,13 @@ impl Index {
             }
             let _ = (rep.hash, rep.recursive_size);
         }
-        Ok(Self { bundles, files, paths })
+        let mut sm_by_dir: HashMap<String, Vec<String>> = HashMap::new();
+        for p in paths.keys().filter(|p| p.ends_with(".sm")) {
+            if let Some((dir, _)) = p.rsplit_once('/') {
+                sm_by_dir.entry(dir.to_string()).or_default().push(p.clone());
+            }
+        }
+        Ok(Self { bundles, files, paths, sm_by_dir })
     }
 }
 

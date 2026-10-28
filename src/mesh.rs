@@ -141,56 +141,158 @@ fn dolm(c: &mut Cur) -> Result<Mesh> {
     Ok(out)
 }
 
-/// `.smd`, version 3 layout.
-pub fn parse_smd(data: &[u8]) -> Result<Mesh> {
-    let mut c = Cur { d: data, p: 0 };
-    let version = c.u8()?;
-    if version < 3 {
-        bail!("smd version {version} is not supported yet");
+fn utf16(raw: &[u8]) -> String {
+    let units: Vec<u16> = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+    String::from_utf16_lossy(&units)
+}
+
+fn read_indices(c: &mut Cur, verts: u32, tris: u32) -> Result<Vec<u32>> {
+    let count = tris as usize * 3;
+    if verts < 0x10000 {
+        (0..count).map(|_| c.u16().map(u32::from)).collect()
+    } else {
+        (0..count).map(|_| c.u32()).collect()
     }
+}
+
+fn normal(n: &[u8]) -> [f32; 3] {
+    [n[0] as i8 as f32 / 127.0, n[1] as i8 as f32 / 127.0, n[2] as i8 as f32 / 127.0]
+}
+
+/// Turn "first triangle of each shape" markers into index ranges.
+fn shapes_from_starts(starts: &[u32], total_tris: u32) -> Vec<Shape> {
+    starts
+        .iter()
+        .enumerate()
+        .map(|(i, &start)| {
+            let end = starts.get(i + 1).copied().unwrap_or(total_tris);
+            Shape { first_index: start * 3, index_count: end.saturating_sub(start) * 3, ..Default::default() }
+        })
+        .collect()
+}
+
+/// `.smd`, version 3 layout.
+fn parse_smd_v3(c: &mut Cur) -> Result<Mesh> {
     c.u8()?; // vertex format
     let shapes = c.u16()? as usize;
     c.u32()?; // bytes in the name section
     let bbox = c.bbox()?;
-    let mut mesh = dolm(&mut c)?;
+    let mut mesh = dolm(c)?;
     let lens: Vec<usize> = (0..shapes).map(|_| c.u32().map(|v| v as usize)).collect::<Result<_>>()?;
     for (i, len) in lens.into_iter().enumerate() {
-        let raw = c.take(len)?;
-        let units: Vec<u16> = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        let name = utf16(c.take(len)?);
         if let Some(s) = mesh.shapes.get_mut(i) {
-            s.name = String::from_utf16_lossy(&units);
+            s.name = name;
         }
     }
     mesh.bbox = bbox;
     Ok(mesh)
 }
 
-/// `.fmt`, version 9 layout.
+/// `.smd`, versions 1 and 2: flat vertex/index buffers.
+fn parse_smd_v1_2(c: &mut Cur, version: u8) -> Result<Mesh> {
+    let tris = c.u32()?;
+    let verts = c.u32()?;
+    let fmt = c.u8()?;
+    let shapes = c.u16()? as usize;
+    c.u32()?; // bytes in the name section
+    let bbox = c.bbox()?;
+    if version == 2 {
+        c.u32()?;
+    }
+    let extents: Vec<(usize, u32)> =
+        (0..shapes).map(|_| Ok((c.u32()? as usize, c.u32()?))).collect::<Result<_>>()?;
+    let names: Vec<String> = extents.iter().map(|&(len, _)| c.take(len).map(utf16)).collect::<Result<_>>()?;
+    let indices = read_indices(c, verts, tris)?;
+
+    let (mut positions, mut normals, mut uvs) = (Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..verts {
+        positions.push([c.f32()?, c.f32()?, c.f32()?]);
+        normals.push(normal(c.take(4)?));
+        c.take(4)?; // tangent
+        uvs.push([f16(c.u16()?), f16(c.u16()?)]);
+        c.take(8)?; // bone indices + weights
+        if fmt >> 1 & 1 == 1 {
+            c.take(4)?;
+        }
+        if fmt & 1 == 1 {
+            c.take(4)?;
+        }
+    }
+    let starts: Vec<u32> = extents.iter().map(|e| e.1).collect();
+    let mut shapes_out = shapes_from_starts(&starts, tris);
+    for (s, n) in shapes_out.iter_mut().zip(names) {
+        s.name = n;
+    }
+    Ok(Mesh { positions, normals, uvs, indices, shapes: shapes_out, bbox })
+}
+
+pub fn parse_smd(data: &[u8]) -> Result<Mesh> {
+    let mut c = Cur { d: data, p: 0 };
+    match c.u8()? {
+        v @ (1 | 2) => parse_smd_v1_2(&mut c, v),
+        v if v >= 3 => parse_smd_v3(&mut c),
+        v => bail!("smd version {v} is not supported"),
+    }
+}
+
+/// `.fmt`: versions up to 8 store flat buffers, 9 embeds a `DOLm` block.
 pub fn parse_fmt(data: &[u8]) -> Result<Mesh> {
     let mut c = Cur { d: data, p: 0 };
     let version = c.u8()?;
-    if version < 9 {
-        bail!("fmt version {version} is not supported yet");
-    }
+    let counts = if version < 9 { Some((c.u32()?, c.u32()?)) } else { None };
     let shapes = c.u16()? as usize;
     let subs = c.u8()? as usize;
     let _d1_total = c.u16()?;
     let d3s = c.u8()? as usize;
     let bbox = c.bbox()?;
-    let mut mesh = dolm(&mut c)?;
 
-    let shape_refs: Vec<(u32, u32)> =
-        (0..shapes).map(|_| Ok((c.u32()?, c.u32()?))).collect::<Result<_>>()?;
+    // (name offset, material offset, first triangle for flat layouts)
+    let (mut mesh, shape_refs): (Mesh, Vec<(u32, u32, u32)>);
     let mut d1_counts = Vec::new();
-    for _ in 0..subs {
-        c.u8()?;
-        d1_counts.push(c.u8()? as usize);
-        c.u32()?;
+    if let Some((tris, verts)) = counts {
+        let vertex_format = if version >= 8 { c.u32()? } else { 0 };
+        let refs: Vec<(u32, u32, u32)> =
+            (0..shapes).map(|_| Ok((c.u32()?, c.u32()?, c.u32()?))).collect::<Result<_>>()?;
+        for _ in 0..subs {
+            c.u8()?;
+            d1_counts.push(c.u8()? as usize);
+            c.u32()?;
+        }
+        let indices = read_indices(&mut c, verts, tris)?;
+        let (mut positions, mut normals, mut uvs) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..verts {
+            positions.push([c.f32()?, c.f32()?, c.f32()?]);
+            normals.push(normal(c.take(4)?));
+            c.take(4)?; // tangent
+            uvs.push([f16(c.u16()?), f16(c.u16()?)]);
+            if vertex_format == 1 {
+                c.take(4)?;
+            }
+        }
+        let starts: Vec<u32> = refs.iter().map(|r| r.2).collect();
+        mesh = Mesh { positions, normals, uvs, indices, shapes: shapes_from_starts(&starts, tris), bbox };
+        shape_refs = refs;
+    } else {
+        mesh = dolm(&mut c)?;
+        shape_refs = (0..shapes).map(|_| Ok((c.u32()?, c.u32()?, 0))).collect::<Result<_>>()?;
+        for _ in 0..subs {
+            c.u8()?;
+            d1_counts.push(c.u8()? as usize);
+            c.u32()?;
+        }
     }
     for n in d1_counts {
         c.take(12 * n)?;
     }
-    c.take(87 * d3s)?;
+    let d3_width = match version {
+        0..3 => 45,
+        3 => 70,
+        4..6 => 78,
+        6 => 83,
+        _ => 87,
+    };
+    c.take(d3_width * d3s)?;
     let len = c.u32()? as usize;
     let table: Vec<u16> = c
         .take(len * 2)?
@@ -202,7 +304,7 @@ pub fn parse_fmt(data: &[u8]) -> Result<Mesh> {
         let end = tail.iter().position(|&u| u == 0).unwrap_or(tail.len());
         String::from_utf16_lossy(&tail[..end])
     };
-    for (s, (name, material)) in mesh.shapes.iter_mut().zip(shape_refs) {
+    for (s, (name, material, _)) in mesh.shapes.iter_mut().zip(shape_refs) {
         s.name = read(name);
         s.material = read(material);
     }

@@ -20,10 +20,17 @@ pub struct ShapeTex {
 pub fn shape_materials(idx: &Index, dir: &Path, mesh_path: &str, mesh: &Mesh) -> Vec<String> {
     let mut mats: Vec<String> = mesh.shapes.iter().map(|s| s.material.clone()).collect();
     if mats.iter().all(|m| m.is_empty()) {
-        let info = sm::descriptor_path(mesh_path)
-            .and_then(|p| idx.read_file(dir, &p).ok())
-            .and_then(|b| sm::parse(&b).ok())
-            .filter(|i| i.mesh.eq_ignore_ascii_case(mesh_path));
+        // The descriptor usually shares the mesh's name, but may be named after
+        // the directory, so try the guess first and then every `.sm` beside it.
+        let dir_key = mesh_path.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+        let guess = sm::descriptor_path(mesh_path);
+        let siblings = idx.sm_by_dir.get(&dir_key).into_iter().flatten();
+        let info = guess
+            .iter()
+            .chain(siblings)
+            .filter_map(|p| idx.read_file(dir, p).ok())
+            .filter_map(|b| sm::parse(&b).ok())
+            .find(|i| i.mesh.eq_ignore_ascii_case(mesh_path));
         if let Some(info) = info {
             let expanded = info.materials.iter().flat_map(|(m, n)| std::iter::repeat_n(m.clone(), *n));
             for (slot, m) in mats.iter_mut().zip(expanded) {
