@@ -274,11 +274,21 @@ impl Renderer {
 
         let white = RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
 
+        // Shapes with the same material share one texture and bind group.
+        let mut binds: std::collections::HashMap<&str, wgpu::BindGroup> = std::collections::HashMap::new();
         let draws = mesh
             .shapes
             .iter()
             .zip(textures)
             .map(|(shape, tex)| {
+                if let Some(bind) = binds.get(shape.material.as_str()).filter(|_| !shape.material.is_empty()) {
+                    let hidden = tex.as_ref().is_some_and(|t| t.invisible);
+                    return Draw {
+                        first_index: shape.first_index,
+                        index_count: if hidden { 0 } else { shape.index_count },
+                        bind: bind.clone(),
+                    };
+                }
                 let (img, alpha_test) = match tex {
                     Some(t) => (&t.img, t.alpha_test),
                     None => (&white, false),
@@ -320,6 +330,7 @@ impl Renderer {
                     ],
                 });
                 let hidden = tex.as_ref().is_some_and(|t| t.invisible);
+                binds.insert(shape.material.as_str(), bind.clone());
                 Draw { first_index: shape.first_index, index_count: if hidden { 0 } else { shape.index_count }, bind }
             })
             .collect();
@@ -743,9 +754,12 @@ fn show_play(
     window: Option<&Window>,
 ) -> Option<Play> {
     let load = |path: &str| -> Option<(mesh::Mesh, Vec<Option<model::ShapeTex>>)> {
+        let t0 = Instant::now();
         match model::load_mesh(idx, dir, path) {
             Ok(m) => {
+                let t1 = Instant::now();
                 let t = model::load_shape_textures(idx, dir, path, &m);
+                eprintln!("{path}: geometry {:.1}s, textures {:.1}s", (t1 - t0).as_secs_f32(), t1.elapsed().as_secs_f32());
                 Some((m, t))
             }
             Err(e) => {

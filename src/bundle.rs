@@ -72,12 +72,32 @@ pub fn decompress_with(
     first: usize,
     count: usize,
 ) -> Result<Vec<u8>> {
+    let start = hdr.data_offset + hdr.block_sizes[..first.min(hdr.block_sizes.len())].iter().map(|&s| s as usize).sum::<usize>();
+    decompress_blocks(data.get(start..).context("block range out of bounds")?, hdr, first, count)
+}
+
+/// Byte offset, relative to the first compressed block, where block `first` starts,
+/// and the total compressed length of blocks `first..first + count`.
+pub fn block_span(hdr: &BundleHeader, first: usize, count: usize) -> (usize, usize) {
+    let before = hdr.block_sizes[..first].iter().map(|&s| s as usize).sum::<usize>();
+    let len = hdr.block_sizes[first..first + count].iter().map(|&s| s as usize).sum::<usize>();
+    (before, len)
+}
+
+/// Decompress blocks `first..first + count` given only their compressed bytes
+/// (`compressed` begins at the start of block `first`).
+pub fn decompress_blocks(
+    compressed: &[u8],
+    hdr: &BundleHeader,
+    first: usize,
+    count: usize,
+) -> Result<Vec<u8>> {
     ensure!(first + count <= hdr.block_sizes.len(), "block range out of bounds");
     let gran = hdr.granularity as usize;
     let total = hdr.uncompressed_size as usize;
 
-    let mut src = hdr.data_offset
-        + hdr.block_sizes[..first].iter().map(|&s| s as usize).sum::<usize>();
+    let data = compressed;
+    let mut src = 0usize;
     let mut out = Vec::with_capacity(count * gran);
     let mut ex = Extractor::new();
     let mut buf = vec![0u8; gran];

@@ -9,6 +9,7 @@ use image_dds::ddsfile::Dds;
 
 use crate::{index::Index, material, mesh::Mesh, sm};
 
+#[derive(Clone)]
 pub struct ShapeTex {
     pub img: RgbaImage,
     /// Treat the alpha channel as cut-out transparency.
@@ -57,7 +58,12 @@ pub fn load_shape_textures(idx: &Index, dir: &Path, mesh_path: &str, mesh: &Mesh
         let img = image_dds::image_from_dds(&dds, 0).ok()?;
         Some(ShapeTex { img, alpha_test: !m.opaque, invisible: false })
     };
-    shape_materials(idx, dir, mesh_path, mesh).iter().map(|m| load(m)).collect()
+    // Many shapes share a material: decode each one once.
+    let mut cache: std::collections::HashMap<String, Option<ShapeTex>> = std::collections::HashMap::new();
+    shape_materials(idx, dir, mesh_path, mesh)
+        .iter()
+        .map(|m| cache.entry(m.clone()).or_insert_with(|| load(m)).clone())
+        .collect()
 }
 
 /// Load any supported geometry: a model (`.fmt`, `.smd`) or a whole terrain tile (`.tgt`).

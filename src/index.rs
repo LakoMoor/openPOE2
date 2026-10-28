@@ -100,15 +100,27 @@ impl Index {
             .or_else(|| self.paths.get(path))
             .with_context(|| format!("{path}: not in index"))?;
         let info = &self.bundles[rec.bundle as usize];
-        let raw = std::fs::read(dir.join(format!("{}.bundle.bin", info.name)))
-            .with_context(|| format!("reading bundle {}", info.name))?;
-        let hdr = bundle::BundleHeader::parse(&raw)?;
+        // Bundles are large: read the head, then only the blocks that hold this file.
+        use std::io::{Read, Seek, SeekFrom};
+        let bundle_path = dir.join(format!("{}.bundle.bin", info.name));
+        let mut file = std::fs::File::open(&bundle_path).with_context(|| format!("opening bundle {}", info.name))?;
+        let mut prefix = [0u8; 12];
+        file.read_exact(&mut prefix)?;
+        let head_size = u32::from_le_bytes(prefix[8..12].try_into()?) as usize;
+        let mut head = vec![0u8; 12 + head_size];
+        head[..12].copy_from_slice(&prefix);
+        file.read_exact(&mut head[12..])?;
+        let hdr = bundle::BundleHeader::parse(&head)?;
         let gran = hdr.granularity as usize;
         let (start, len) = (rec.offset as usize, rec.size as usize);
         ensure!(len > 0, "{path}: empty file record");
         let first = start / gran;
         let last = (start + len - 1) / gran;
-        let blocks = bundle::decompress_with(&raw, &hdr, first, last - first + 1)?;
+        let (before, span) = bundle::block_span(&hdr, first, last - first + 1);
+        file.seek(SeekFrom::Start((hdr.data_offset + before) as u64))?;
+        let mut compressed = vec![0u8; span];
+        file.read_exact(&mut compressed)?;
+        let blocks = bundle::decompress_blocks(&compressed, &hdr, first, last - first + 1)?;
         let off = start - first * gran;
         Ok(blocks
             .get(off..off + len)
