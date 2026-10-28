@@ -1,0 +1,10 @@
+[package]
+name = "poe2_bundles"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "Offline engine for a locally installed Path of Exile 2 (unofficial)"
+
+[dependencies]
+anyhow = "1.0.104"
+oozextract = "0.5.7"

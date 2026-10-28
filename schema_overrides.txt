@@ -1,0 +1,24 @@
+# Row-layout fixes for the installed game build relative to the community dat-schema.
+# Indices refer to columns in the schema file, counting anonymous '_' columns.
+# <Table> drop <idx>...   remove columns      <Table> insert <idx> <bytes>   add unknown bytes before idx
+
+AlternatePassiveAdditions insert 4 12
+AlternatePassiveSkills insert 5 28
+AlternateTreeVersions insert 1 12
+BreachStashTabSubStashGroup drop 3
+BuffVisuals drop 20 21
+CharacterAudioEvents drop 11
+EndgameMapAtlas drop 24 25
+EndgameMapContentVisualIdentity insert 3 3
+GrantedEffects drop 20 21
+ItemVisualIdentity insert 84 12
+MapPins drop 12
+MonsterVarieties insert 13 12
+NPCDialogueStyles drop 12
+NPCs drop 14
+PassiveJewelRadiiArt drop 7
+RogueExiles insert 10 12
+ShapeShiftForms insert 4 12
+ShopTag drop 5 8
+Stats drop 7
+WeaponImpactSoundData insert 0 12

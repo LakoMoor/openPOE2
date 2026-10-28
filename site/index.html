@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openPOE2 — an offline, open-source engine for your own Path of Exile 2 files</title>
+<meta name="description" content="openPOE2 is an independent, from-scratch Rust engine that reads a legitimately installed copy of Path of Exile 2 and aims to run it offline.">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<style>
+  :root{
+    --bg:#0b0807; --panel:#15100d; --line:#2e211a; --text:#e9ddd0; --mute:#a3917f;
+    --ember:#f08a2c; --gold:#ffd27a; --red:#b3391a; --ok:#7fd28a;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#2a1a14 0%,var(--bg) 60%) fixed;
+       color:var(--text);font:16px/1.65 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif}
+  a{color:var(--gold);text-decoration:none} a:hover{text-decoration:underline}
+  .wrap{max-width:980px;margin:0 auto;padding:0 24px}
+  nav{display:flex;align-items:center;gap:20px;padding:18px 0}
+  nav img{width:34px;height:34px}
+  nav b{font-size:18px;letter-spacing:.02em}
+  nav .sp{flex:1}
+  nav a{color:var(--mute);font-size:14px} nav a:hover{color:var(--gold);text-decoration:none}
+  .hero{display:grid;grid-template-columns:1fr 220px;gap:40px;align-items:center;padding:56px 0 40px}
+  .hero img{width:220px;height:220px;filter:drop-shadow(0 0 40px #f08a2c55)}
+  h1{font-size:clamp(34px,6vw,58px);line-height:1.08;margin:0 0 16px;letter-spacing:-.01em}
+  h1 em{font-style:normal;background:linear-gradient(180deg,var(--gold),var(--ember) 60%,var(--red));
+        -webkit-background-clip:text;background-clip:text;color:transparent}
+  .lead{color:var(--mute);font-size:18px;max-width:560px;margin:0 0 24px}
+  .badge{display:inline-block;border:1px solid var(--line);background:var(--panel);color:var(--mute);
+         padding:4px 12px;border-radius:99px;font-size:13px;margin-right:8px}
+  .badge.warn{color:var(--gold);border-color:#5a3d22}
+  section{padding:36px 0;border-top:1px solid var(--line)}
+  h2{font-size:26px;margin:0 0 6px} h2 + p{margin-top:0;color:var(--mute)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-top:18px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}
+  .card .n{font-size:32px;font-weight:700;color:var(--gold);font-variant-numeric:tabular-nums}
+  .card .l{color:var(--mute);font-size:14px}
+  ol.steps{list-style:none;counter-reset:s;padding:0;margin:18px 0 0}
+  ol.steps li{counter-increment:s;display:grid;grid-template-columns:44px 1fr auto;gap:14px;align-items:start;
+              padding:14px 0;border-bottom:1px solid var(--line)}
+  ol.steps li::before{content:counter(s);width:34px;height:34px;border-radius:50%;display:grid;place-items:center;
+              background:var(--panel);border:1px solid #5a3d22;color:var(--gold);font-weight:700}
+  ol.steps b{display:block} ol.steps span{color:var(--mute);font-size:14px}
+  .tag{font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--line);color:var(--mute);white-space:nowrap}
+  .tag.done{color:var(--ok);border-color:#2f5a38} .tag.wip{color:var(--gold);border-color:#5a3d22}
+  pre{background:#080605;border:1px solid var(--line);border-radius:12px;padding:16px 18px;overflow:auto;
+      font:13.5px/1.55 "Cascadia Mono",Consolas,monospace;color:#d9cdbf;margin:14px 0}
+  pre .p{color:var(--ember)} pre .g{color:var(--ok)} pre .d{color:#7d6c5c}
+  .shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:18px}
+  .shot{aspect-ratio:16/10;border:1px dashed #4a3526;border-radius:12px;display:grid;place-items:center;text-align:center;
+        color:var(--mute);background:repeating-linear-gradient(45deg,#110c09,#110c09 12px,#140e0b 12px,#140e0b 24px);padding:16px}
+  .shot b{color:var(--text);display:block;margin-bottom:4px}
+  .notice{background:#1a110c;border:1px solid #5a3d22;border-radius:12px;padding:16px 18px;color:var(--mute);font-size:15px}
+  .notice b{color:var(--gold)}
+  footer{padding:30px 0 60px;color:var(--mute);font-size:13px;border-top:1px solid var(--line)}
+  @media(max-width:720px){.hero{grid-template-columns:1fr}.hero img{width:140px;height:140px;order:-1}
+                          ol.steps li{grid-template-columns:44px 1fr}.tag{grid-column:2;justify-self:start}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <img src="icon.svg" alt="">
+    <b>openPOE2</b><span class="sp"></span>
+    <a href="#status">Status</a><a href="#roadmap">Roadmap</a><a href="#screens">Screens</a><a href="#legal">Legal</a>
+  </nav>
+
+  <header class="hero">
+    <div>
+      <h1>Your own game files.<br><em>An open engine.</em></h1>
+      <p class="lead">openPOE2 is an independent, from-scratch engine written in Rust. It reads a legitimately installed copy of
+        Path of Exile&nbsp;2 and aims to run it fully offline — no servers, no accounts.</p>
+      <span class="badge warn">early development</span><span class="badge">Rust</span><span class="badge">needs your own copy</span>
+    </div>
+    <img src="icon.svg" alt="openPOE2 icon">
+  </header>
+
+  <section id="status">
+    <h2>Where it stands</h2>
+    <p>Measured on a real Steam install, build 26261440.</p>
+    <div class="grid">
+      <div class="card"><div class="n">63,376</div><div class="l">bundles indexed</div></div>
+      <div class="card"><div class="n">4,266,867</div><div class="l">files located by path</div></div>
+      <div class="card"><div class="n">2,976</div><div class="l">data tables extracted, 0 failures</div></div>
+      <div class="card"><div class="n">549 / 568</div><div class="l">tables fully decoded against the community schema</div></div>
+    </div>
+<pre><span class="p">$</span> poe2_bundles "…/Path of Exile 2/Bundles2" data/balance/activeskills.datc64 out.datc64
+index: 63376 bundles, 4266867 files, 4266862 resolved paths (4.2s)
+extracted data/balance/activeskills.datc64: 1376430 bytes
+
+<span class="p">$</span> datdump &lt;dat-schema&gt; --check tables/
+<span class="g">fully decoded: 549</span>, size mismatch: 19, decode failures: 0, no schema: 455</pre>
+  </section>
+
+  <section id="roadmap">
+    <h2>Roadmap</h2>
+    <p>The goal is a faithful reimplementation. Everything that lives in the game files can be matched exactly;
+       server-side behaviour (zone generation, monster AI, loot, damage resolution) is not stored in the client and has to be
+       reconstructed from data and observation, so it will be an approximation.</p>
+    <ol class="steps">
+      <li><div><b>Bundle &amp; index reader</b><span>Oodle-compressed bundles, 4.2&nbsp;M-file path index.</span></div><span class="tag done">done</span></li>
+      <li><div><b>Data tables</b><span>.datc64 reader with schema validation; 19 tables still being re-fitted.</span></div><span class="tag wip">in progress</span></li>
+      <li><div><b>Models, textures, animations</b><span>Format documentation and loaders.</span></div><span class="tag">next</span></li>
+      <li><div><b>Viewer</b><span>wgpu renderer for zones and characters.</span></div><span class="tag">planned</span></li>
+      <li><div><b>Offline game core</b><span>Movement, skills, stats, items, a first playable zone.</span></div><span class="tag">planned</span></li>
+    </ol>
+  </section>
+
+  <section id="screens">
+    <h2>Screenshots</h2>
+    <p>There is no renderer yet, so there is nothing honest to show here. This section will be filled as soon as the viewer draws its first frame.</p>
+    <div class="shots">
+      <div class="shot"><div><b>Asset viewer</b>coming with the wgpu viewer</div></div>
+      <div class="shot"><div><b>Zone loading</b>coming with the wgpu viewer</div></div>
+      <div class="shot"><div><b>Skill &amp; stat browser</b>coming with the table fits</div></div>
+    </div>
+  </section>
+
+  <section id="legal">
+    <h2>Legal</h2>
+    <div class="notice">
+      <b>Independent project.</b> openPOE2 is not affiliated with, endorsed by or connected to Grinding Gear Games.
+      “Path of Exile” and related names are trademarks of their owners. The repository contains no game content;
+      you need your own legitimately installed copy, which is only ever read. The project never connects to official servers
+      and does not touch anti-cheat. The icon is original artwork.
+    </div>
+  </section>
+
+  <footer>openPOE2 · early development · built with Rust</footer>
+</div>
+</body>
+</html>
