@@ -1,0 +1,623 @@
+//! `viewer <Bundles2> <model .smd/.fmt> [--screenshot out.png [yaw-degrees]] [--size WxH]`
+//!
+//! Interactive wgpu viewer: drag to orbit, wheel to zoom, Space toggles
+//! auto-rotation, Esc quits. With `--screenshot` it renders one frame offscreen
+//! (no window) and saves it.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use bytemuck::{Pod, Zeroable};
+use glam::{Mat4, Vec3};
+use image::{imageops, RgbaImage};
+use poe2_bundles::{index::Index, mesh, model};
+use wgpu::util::DeviceExt;
+use winit::application::ApplicationHandler;
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, NamedKey};
+use winit::window::{Window, WindowId};
+
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+const SHADER: &str = r#"
+struct Globals { view_proj: mat4x4<f32>, light: vec4<f32> };
+@group(0) @binding(0) var<uniform> g: Globals;
+struct Params { flags: vec4<f32> };
+@group(1) @binding(0) var<uniform> p: Params;
+@group(1) @binding(1) var t: texture_2d<f32>;
+@group(1) @binding(2) var s: sampler;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) n: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
+@vertex
+fn vs(@location(0) pos: vec3<f32>, @location(1) n: vec3<f32>, @location(2) uv: vec2<f32>) -> VOut {
+    var o: VOut;
+    o.pos = g.view_proj * vec4<f32>(pos, 1.0);
+    o.n = n;
+    o.uv = uv;
+    return o;
+}
+
+@fragment
+fn fs(in: VOut) -> @location(0) vec4<f32> {
+    var base = vec3<f32>(0.62, 0.45, 0.30);
+    let c = textureSample(t, s, in.uv);
+    if (p.flags.y > 0.5) {
+        if (p.flags.x > 0.5 && c.a < 0.5) { discard; }
+        base = c.rgb;
+    }
+    let n = normalize(in.n);
+    let key = abs(dot(n, normalize(g.light.xyz)));
+    let fill = abs(dot(n, normalize(vec3<f32>(-0.5, -0.2, 0.8)))) * 0.25;
+    return vec4<f32>(base * (0.22 + 0.78 * key + fill), 1.0);
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Vertex {
+    pos: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Globals {
+    view_proj: [[f32; 4]; 4],
+    light: [f32; 4],
+}
+
+struct Draw {
+    first_index: u32,
+    index_count: u32,
+    bind: wgpu::BindGroup,
+}
+
+struct Scene {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    draws: Vec<Draw>,
+    /// Bounding radius of the centred model.
+    radius: f32,
+}
+
+struct Renderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: wgpu::RenderPipeline,
+    globals: wgpu::Buffer,
+    globals_bind: wgpu::BindGroup,
+    scene: Scene,
+}
+
+/// Build the mip chain of `img` (level 0 first).
+fn mip_chain(img: &RgbaImage) -> Vec<RgbaImage> {
+    let mut levels = vec![img.clone()];
+    while levels.last().is_some_and(|l| l.width() > 1 || l.height() > 1) {
+        let l = levels.last().unwrap();
+        let (w, h) = ((l.width() / 2).max(1), (l.height() / 2).max(1));
+        levels.push(imageops::resize(l, w, h, imageops::FilterType::Triangle));
+    }
+    levels
+}
+
+impl Renderer {
+    fn new(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        target: wgpu::TextureFormat,
+        mesh: &mesh::Mesh,
+        textures: &[Option<model::ShapeTex>],
+    ) -> Self {
+        let globals = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("globals"),
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_entry = |binding, visibility| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("globals layout"),
+            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT)],
+        });
+        let shape_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shape layout"),
+            entries: &[
+                uniform_entry(0, wgpu::ShaderStages::FRAGMENT),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let globals_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("globals bind"),
+            layout: &globals_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() }],
+        });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("model shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("pipeline layout"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&shape_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("model pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(target.into())],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Centre the model and turn its Z-down axes into Y-up.
+        let b = mesh.bbox;
+        let c = [(b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0, (b[4] + b[5]) / 2.0];
+        let to_view = |v: [f32; 3]| [v[0], -v[2], v[1]];
+        let mut radius = 0.0f32;
+        let vertices: Vec<Vertex> = mesh
+            .positions
+            .iter()
+            .zip(&mesh.normals)
+            .zip(&mesh.uvs)
+            .map(|((p, n), uv)| {
+                let pos = to_view([p[0] - c[0], p[1] - c[1], p[2] - c[2]]);
+                radius = radius.max(Vec3::from(pos).length());
+                Vertex { pos, normal: to_view(*n), uv: *uv }
+            })
+            .collect();
+        let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
+        let white = RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
+
+        let draws = mesh
+            .shapes
+            .iter()
+            .zip(textures)
+            .map(|(shape, tex)| {
+                let (img, alpha_test) = match tex {
+                    Some(t) => (&t.img, t.alpha_test),
+                    None => (&white, false),
+                };
+                let levels = mip_chain(img);
+                let texture = device.create_texture_with_data(
+                    &queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some("shape texture"),
+                        size: wgpu::Extent3d { width: img.width(), height: img.height(), depth_or_array_layers: 1 },
+                        mip_level_count: levels.len() as u32,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    &levels.iter().flat_map(|l| l.as_raw().iter().copied()).collect::<Vec<u8>>(),
+                );
+                let flags: [f32; 4] = [alpha_test as u32 as f32, tex.is_some() as u32 as f32, 0.0, 0.0];
+                let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("shape params"),
+                    contents: bytemuck::cast_slice(&flags),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("shape bind"),
+                    layout: &shape_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(
+                                &texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                            ),
+                        },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+                    ],
+                });
+                Draw { first_index: shape.first_index, index_count: shape.index_count, bind }
+            })
+            .collect();
+
+        Self {
+            device,
+            queue,
+            pipeline,
+            globals,
+            globals_bind,
+            scene: Scene { vertices: vertex_buf, indices: index_buf, draws, radius: radius.max(1e-3) },
+        }
+    }
+
+    fn render(&self, color: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32), cam: &Camera) {
+        let aspect = size.0 as f32 / size.1.max(1) as f32;
+        let r = self.scene.radius;
+        let proj = perspective(40f32.to_radians(), aspect, r * 0.05, r * 40.0);
+        let view = look_at(cam.eye(r), Vec3::ZERO, Vec3::Y);
+        let g = Globals { view_proj: (proj * view).to_cols_array_2d(), light: [0.4, 0.7, 0.6, 0.0] };
+        self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
+
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("main"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.004, g: 0.003, b: 0.002, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.globals_bind, &[]);
+            pass.set_vertex_buffer(0, self.scene.vertices.slice(..));
+            pass.set_index_buffer(self.scene.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for d in &self.scene.draws {
+                pass.set_bind_group(1, &d.bind, &[]);
+                pass.draw_indexed(d.first_index..d.first_index + d.index_count, 0, 0..1);
+            }
+        }
+        self.queue.submit([enc.finish()]);
+    }
+
+    fn depth_view(&self, size: (u32, u32)) -> wgpu::TextureView {
+        self.device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("depth"),
+                size: wgpu::Extent3d { width: size.0.max(1), height: size.1.max(1), depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&Default::default())
+    }
+}
+
+/// Right-handed perspective with a 0..1 depth range (wgpu clip space).
+fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    let f = 1.0 / (fovy / 2.0).tan();
+    let d = near - far;
+    Mat4::from_cols_array(&[
+        f / aspect, 0.0, 0.0, 0.0,
+        0.0, f, 0.0, 0.0,
+        0.0, 0.0, far / d, -1.0,
+        0.0, 0.0, near * far / d, 0.0,
+    ])
+}
+
+fn look_at(eye: Vec3, center: Vec3, up: Vec3) -> Mat4 {
+    let f = (center - eye).normalize();
+    let s = f.cross(up).normalize();
+    let u = s.cross(f);
+    Mat4::from_cols_array(&[
+        s.x, u.x, -f.x, 0.0,
+        s.y, u.y, -f.y, 0.0,
+        s.z, u.z, -f.z, 0.0,
+        -s.dot(eye), -u.dot(eye), f.dot(eye), 1.0,
+    ])
+}
+
+#[derive(Clone, Copy)]
+struct Camera {
+    yaw: f32,
+    pitch: f32,
+    zoom: f32,
+}
+
+impl Camera {
+    fn eye(&self, radius: f32) -> Vec3 {
+        let d = radius * 3.4 * self.zoom;
+        Vec3::new(
+            d * self.pitch.cos() * self.yaw.sin(),
+            d * self.pitch.sin(),
+            d * self.pitch.cos() * self.yaw.cos(),
+        )
+    }
+}
+
+async fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue)> {
+    let mut limits = wgpu::Limits::default();
+    limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d.min(16384);
+    Ok(adapter
+        .request_device(&wgpu::DeviceDescriptor { label: Some("device"), required_limits: limits, ..Default::default() })
+        .await?)
+}
+
+fn screenshot(mesh: &mesh::Mesh, textures: &[Option<model::ShapeTex>], size: (u32, u32), yaw: f32, out: &str) -> Result<()> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        .context("no graphics adapter")?;
+    println!("adapter: {}", adapter.get_info().name);
+    let (device, queue) = pollster::block_on(request_device(&adapter))?;
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let renderer = Renderer::new(device, queue, format, mesh, textures);
+
+    let color = renderer.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen"),
+        size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let depth = renderer.depth_view(size);
+    renderer.render(&color.create_view(&Default::default()), &depth, size, &Camera { yaw, pitch: 0.25, zoom: 1.0 });
+
+    let row = (size.0 * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let buf = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (row * size.1) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = renderer.device.create_command_encoder(&Default::default());
+    enc.copy_texture_to_buffer(
+        color.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(size.1) },
+        },
+        wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+    );
+    renderer.queue.submit([enc.finish()]);
+    buf.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("map readback"));
+    renderer.device.poll(wgpu::PollType::wait_indefinitely())?;
+    let data = buf.slice(..).get_mapped_range().expect("mapped range");
+    let mut img = RgbaImage::new(size.0, size.1);
+    for y in 0..size.1 {
+        let src = &data[(y * row) as usize..(y * row + size.0 * 4) as usize];
+        for x in 0..size.0 {
+            let p = &src[(x * 4) as usize..(x * 4 + 4) as usize];
+            img.put_pixel(x, y, image::Rgba([p[0], p[1], p[2], 255]));
+        }
+    }
+    img.save(out)?;
+    println!("-> {out}");
+    Ok(())
+}
+
+struct Window3d {
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    depth: wgpu::TextureView,
+    renderer: Renderer,
+}
+
+struct App {
+    mesh: mesh::Mesh,
+    textures: Vec<Option<model::ShapeTex>>,
+    title: String,
+    state: Option<Window3d>,
+    cam: Camera,
+    auto_rotate: bool,
+    dragging: bool,
+    last_cursor: Option<(f64, f64)>,
+    last_frame: Instant,
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.state.is_some() {
+            return;
+        }
+        let window = Arc::new(
+            el.create_window(Window::default_attributes().with_title(self.title.clone()).with_inner_size(winit::dpi::LogicalSize::new(1100, 800)))
+                .expect("create window"),
+        );
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(el.owned_display_handle())));
+        let surface = instance.create_surface(window.clone()).expect("create surface");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
+        .expect("no graphics adapter");
+        println!("adapter: {}", adapter.get_info().name);
+        let (device, queue) = pollster::block_on(request_device(&adapter)).expect("device");
+        let size = window.inner_size();
+        let mut config = surface
+            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .expect("surface unsupported by adapter");
+        if let Some(f) = surface.get_capabilities(&adapter).formats.into_iter().find(|f| f.is_srgb()) {
+            config.format = f;
+        }
+        surface.configure(&device, &config);
+        let renderer = Renderer::new(device, queue, config.format, &self.mesh, &self.textures);
+        let depth = renderer.depth_view((config.width, config.height));
+        self.state = Some(Window3d { window, surface, config, depth, renderer });
+    }
+
+    fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        let Some(st) = self.state.as_mut() else { return };
+        match event {
+            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => match event.logical_key {
+                Key::Named(NamedKey::Escape) => el.exit(),
+                Key::Named(NamedKey::Space) => self.auto_rotate = !self.auto_rotate,
+                _ => {}
+            },
+            WindowEvent::MouseInput { button: MouseButton::Left, state, .. } => {
+                self.dragging = state == ElementState::Pressed;
+                self.last_cursor = None;
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if self.dragging {
+                    if let Some((lx, ly)) = self.last_cursor {
+                        self.cam.yaw -= (position.x - lx) as f32 * 0.008;
+                        self.cam.pitch = (self.cam.pitch + (position.y - ly) as f32 * 0.008).clamp(-1.5, 1.5);
+                    }
+                }
+                self.last_cursor = Some((position.x, position.y));
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let d = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                self.cam.zoom = (self.cam.zoom * (1.0 - d * 0.1)).clamp(0.2, 4.0);
+            }
+            WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
+                st.config.width = s.width;
+                st.config.height = s.height;
+                st.surface.configure(&st.renderer.device, &st.config);
+                st.depth = st.renderer.depth_view((s.width, s.height));
+            }
+            WindowEvent::RedrawRequested => {
+                let now = Instant::now();
+                let dt = (now - self.last_frame).as_secs_f32();
+                self.last_frame = now;
+                if self.auto_rotate && !self.dragging {
+                    self.cam.yaw += dt * 0.5;
+                }
+                match st.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                        let view = frame.texture.create_view(&Default::default());
+                        st.renderer.render(&view, &st.depth, (st.config.width, st.config.height), &self.cam);
+                        st.window.pre_present_notify();
+                        st.renderer.queue.present(frame);
+                    }
+                    _ => st.surface.configure(&st.renderer.device, &st.config),
+                }
+                st.window.request_redraw();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn main() -> Result<()> {
+    let a: Vec<String> = std::env::args().collect();
+    anyhow::ensure!(a.len() >= 3, "usage: viewer <Bundles2> <model> [--screenshot out.png [yaw]] [--size WxH]");
+    let dir = PathBuf::from(&a[1]);
+    let idx = Index::parse(&std::fs::read(dir.join("_.index.bin"))?)?;
+    let data = idx.read_file(&dir, &a[2])?;
+    let mesh = mesh::parse(&a[2], &data).with_context(|| format!("parsing {}", a[2]))?;
+    let textures = model::load_shape_textures(&idx, &dir, &mesh);
+    println!(
+        "{}: {} triangles, {} shapes, {} textured",
+        a[2],
+        mesh.indices.len() / 3,
+        mesh.shapes.len(),
+        textures.iter().flatten().count()
+    );
+
+    let size = a
+        .iter()
+        .position(|s| s == "--size")
+        .and_then(|i| a.get(i + 1))
+        .and_then(|s| s.split_once('x'))
+        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        .unwrap_or((1280, 800));
+
+    if let Some(i) = a.iter().position(|s| s == "--screenshot") {
+        let out = a.get(i + 1).context("--screenshot needs an output path")?;
+        let yaw: f32 = a.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(30.0f32);
+        return screenshot(&mesh, &textures, size, yaw.to_radians(), out);
+    }
+
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let mut app = App {
+        mesh,
+        textures,
+        title: format!("openPOE2 — {}", a[2]),
+        state: None,
+        cam: Camera { yaw: 0.5, pitch: 0.25, zoom: 1.0 },
+        auto_rotate: true,
+        dragging: false,
+        last_cursor: None,
+        last_frame: Instant::now(),
+    };
+    event_loop.run_app(&mut app)?;
+    Ok(())
+}

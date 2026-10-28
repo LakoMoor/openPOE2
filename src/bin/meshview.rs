@@ -6,9 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use image::{Rgba, RgbaImage};
 use poe2_bundles::index::Index;
-use poe2_bundles::{material, mesh};
-use image_dds::ddsfile::Dds;
-use std::io::Cursor;
+use poe2_bundles::{mesh, model};
 
 const SIZE: u32 = 900;
 
@@ -33,21 +31,7 @@ fn main() -> Result<()> {
         println!("  shape {:?} material {:?} ({} indices)", s.name, s.material, s.index_count);
     }
 
-    // Load one base-colour texture per shape (None = untextured).
-    struct Tex {
-        img: RgbaImage,
-        alpha_test: bool,
-    }
-    let load_tex = |mat: &str| -> Option<Tex> {
-        if mat.is_empty() {
-            return None;
-        }
-        let m = material::parse(&idx.read_file(&dir, mat).ok()?).ok()?;
-        let dds = Dds::read(&mut Cursor::new(idx.read_file(&dir, &m.albedo?).ok()?)).ok()?;
-        let img = image_dds::image_from_dds(&dds, 0).ok()?;
-        Some(Tex { img, alpha_test: !m.opaque })
-    };
-    let textures: Vec<Option<Tex>> = m.shapes.iter().map(|s| load_tex(&s.material)).collect();
+    let textures = model::load_shape_textures(&idx, &dir, &m);
     println!("textured shapes: {}/{}", textures.iter().flatten().count(), textures.len());
     // Shape owning each triangle.
     let mut tri_shape = vec![usize::MAX; m.indices.len() / 3];

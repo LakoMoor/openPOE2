@@ -7,7 +7,12 @@ description = "Offline engine for a locally installed Path of Exile 2 (unofficia
 
 [dependencies]
 anyhow = "1.0.104"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+glam = "0.34.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 image_dds = { version = "0.7.2", default-features = false, features = ["ddsfile", "image"] }
 oozextract = "0.5.7"
+pollster = "1.0.1"
 serde_json = "1.0.154"
+wgpu = "30.0.1"
+winit = "0.30.13"

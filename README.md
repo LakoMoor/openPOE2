@@ -13,6 +13,7 @@ only ever read. The project never connects to official servers and does not touc
 - `.datc64` table reader with schema validation. 549 of 568 tables with a community schema decode fully.
 - `dds2png` / `icongrid`: texture decoding (BC-compressed DDS) and icon sheets built from table columns.
 - `meshview` / `meshcheck`: mesh loading for current `.fmt` (v9) and `.smd` (v3) models with a software preview renderer that applies `.mat` materials and base-colour textures. Format notes: [poe_data_tools](https://github.com/adamthedash/poe_data_tools) (MIT/Apache-2.0).
+- `viewer`: wgpu model viewer (drag to orbit, wheel to zoom, Space toggles rotation; `--screenshot out.png` renders offscreen).
 - Server-side behaviour is not stored in the client, so gameplay will be a reconstruction, not an exact copy.
 
 ## Usage
