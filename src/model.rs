@@ -140,6 +140,54 @@ impl AreaGround {
     }
 }
 
+/// Tiles of an area's tile set (`master.tsi` -> `TileSet` -> `.tdt` list) with their headers.
+fn area_tiles(idx: &Index, dir: &Path, room_path: &str) -> Vec<crate::tdt::Tdt> {
+    let text = |b: &[u8]| {
+        let b = b.strip_prefix(&[0xff, 0xfe]).unwrap_or(b);
+        String::from_utf16_lossy(&b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>())
+    };
+    let mut parts: Vec<&str> = room_path.split('/').collect();
+    while parts.pop().is_some() && !parts.is_empty() {
+        let area = parts.join("/");
+        let Ok(tsi) = idx.read_file(dir, &format!("{area}/master.tsi")) else { continue };
+        let tsi = text(&tsi);
+        let Some(tst) = tsi.lines().find(|l| l.trim_start().starts_with("TileSet")).and_then(|l| l.split('"').nth(1).map(str::to_string)) else {
+            return Vec::new();
+        };
+        let Ok(list) = idx.read_file(dir, &format!("{area}/{}", tst.to_ascii_lowercase())) else { return Vec::new() };
+        return text(&list)
+            .lines()
+            .filter_map(|l| l.split('"').nth(1).filter(|p| p.to_ascii_lowercase().ends_with(".tdt")).map(str::to_string))
+            .filter_map(|p| crate::tdt::parse(&idx.read_file(dir, &p.to_ascii_lowercase()).ok()?).ok())
+            .collect();
+    }
+    Vec::new()
+}
+
+/// The tile that fits `slot` best, with the number of quarter turns that brings
+/// its edges into the slot's order. Blank tiles carry no geometry and are skipped.
+fn pick_tile<'a>(tiles: &'a [crate::tdt::Tdt], slot: &crate::room::KSlot) -> Option<(&'a crate::tdt::Tdt, usize)> {
+    let mut best: Option<(usize, &crate::tdt::Tdt, usize)> = None;
+    for t in tiles.iter().filter(|t| !t.tgt.to_ascii_lowercase().contains("blank")) {
+        if (t.w, t.h) != (slot.w, slot.h) && (t.w, t.h) != (slot.h, slot.w) {
+            continue;
+        }
+        if slot.edges.iter().all(Option::is_none) {
+            continue;
+        }
+        for r in 0..4 {
+            if !(0..4).all(|i| t.edges[(i + r) % 4] == slot.edges[i]) {
+                continue;
+            }
+            let score = (0..4).filter(|&i| t.grounds[(i + r) % 4] == slot.grounds[i]).count();
+            if best.is_none_or(|b| score > b.0) {
+                best = Some((score, t, r));
+            }
+        }
+    }
+    best.map(|(_, t, r)| (t, r))
+}
+
 /// A room: a ground plane with its doodads placed on it.
 fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
     use crate::room;
@@ -151,7 +199,32 @@ fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
         room::ground_quad(&mut out, side);
     } else {
         let ground = AreaGround::load(idx, dir, path);
-        room::ground_from_slots(&mut out, &r.slots, &|gt: &str| ground.material(idx, dir, gt));
+        // Slots that match a tile of the area get its real geometry; the rest get flat ground.
+        let tiles = area_tiles(idx, dir, path);
+        let mut tile_cache: HashMap<String, Option<Mesh>> = HashMap::new();
+        let mut flat = Vec::new();
+        let mut tiled = 0;
+        for slot in &r.slots {
+            let placed = pick_tile(&tiles, slot).and_then(|(t, rot)| {
+                let mesh = tile_cache.entry(t.tgt.clone()).or_insert_with(|| load_mesh(idx, dir, &t.tgt.to_ascii_lowercase()).ok()).as_ref()?;
+                let b = mesh.bbox;
+                let (cx, cy) = ((b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0);
+                let angle = rot as f32 * std::f32::consts::FRAC_PI_2;
+                let (sn, cs) = angle.sin_cos();
+                let unit = room::CELL * room::CELLS_PER_SIDE as f32;
+                let target = [(slot.col as f32 + slot.w as f32 / 2.0) * unit, (slot.row as f32 + slot.h as f32 / 2.0) * unit];
+                let offset = [target[0] - (cx * cs - cy * sn), target[1] - (cx * sn + cy * cs), 0.0];
+                room::append_placed(&mut out, mesh, angle, 1.0, offset);
+                Some(())
+            });
+            if placed.is_some() {
+                tiled += 1;
+            } else {
+                flat.push(slot.clone());
+            }
+        }
+        eprintln!("{path}: {tiled} of {} slots use real tiles", r.slots.len());
+        room::ground_from_slots(&mut out, &flat, &|gt: &str| ground.material(idx, dir, gt));
     }
 
     let mut cache: HashMap<String, Option<Mesh>> = HashMap::new();
