@@ -58,6 +58,9 @@ pub fn load_shape_textures(idx: &Index, dir: &Path, mesh_path: &str, mesh: &Mesh
 /// Load any supported geometry: a model (`.fmt`, `.smd`) or a whole terrain tile (`.tgt`).
 pub fn load_mesh(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
     use anyhow::Context;
+    if path.ends_with(".arm") {
+        return load_room(idx, dir, path);
+    }
     if !path.ends_with(".tgt") {
         return crate::mesh::parse(path, &idx.read_file(dir, path)?);
     }
@@ -81,5 +84,35 @@ pub fn load_mesh(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
         }
     }
     out.bbox = bbox.unwrap_or_default();
+    Ok(out)
+}
+
+/// A room: a ground plane with its doodads placed on it.
+fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
+    use crate::room;
+    use std::collections::HashMap;
+    let r = room::parse_arm(&idx.read_file(dir, path)?)?;
+    let mut out = Mesh::default();
+    let side = r.side.unwrap_or(2).max(1) as f32 * room::CELLS_PER_SIDE as f32 * room::CELL;
+    room::ground_quad(&mut out, side);
+
+    let mut cache: HashMap<String, Option<Mesh>> = HashMap::new();
+    let mut placed = 0;
+    for d in &r.doodads {
+        let Some(mesh_path) = idx
+            .read_file(dir, &d.ao)
+            .ok()
+            .and_then(|b| room::ao_fixed_mesh(&b))
+        else {
+            continue;
+        };
+        let part = cache.entry(mesh_path.clone()).or_insert_with(|| load_mesh(idx, dir, &mesh_path).ok());
+        if let Some(part) = part {
+            room::append_placed(&mut out, part, d.rotation, d.scale, [d.x * room::CELL, d.y * room::CELL, 0.0]);
+            placed += 1;
+        }
+    }
+    eprintln!("{path}: version {}, {} doodads listed, {placed} placed", r.version, r.doodads.len());
+    room::recompute_bbox(&mut out);
     Ok(out)
 }

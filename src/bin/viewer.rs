@@ -631,7 +631,7 @@ fn main() -> Result<()> {
     let mut list: Vec<String> = match a[2].strip_prefix('@') {
         Some(filter) => {
             let f = filter.to_ascii_lowercase();
-            idx.paths.keys().filter(|p| (p.ends_with(".fmt") || p.ends_with(".smd") || p.ends_with(".tgt")) && p.contains(&f)).cloned().collect()
+            idx.paths.keys().filter(|p| (p.ends_with(".fmt") || p.ends_with(".smd") || p.ends_with(".tgt") || p.ends_with(".arm")) && p.contains(&f)).cloned().collect()
         }
         None => vec![a[2].clone()],
     };

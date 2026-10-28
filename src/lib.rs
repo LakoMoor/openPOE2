@@ -10,3 +10,4 @@ pub mod material;
 pub mod model;
 pub mod sm;
 pub mod terrain;
+pub mod room;
