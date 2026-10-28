@@ -556,6 +556,9 @@ fn screenshot_world(
     let mut cam = Camera { yaw, pitch: 0.6, zoom: 1.0, target: Vec3::ZERO };
     // Walk forward in small steps so the camera and pose settle like in the window.
     play.keys[0] = run;
+    if std::env::var_os("POE2_ATTACK").is_some() {
+        play.attack = Some(0.0);
+    }
     let steps = (seconds * 60.0).max(1.0) as u32;
     for i in 0..steps {
         play.step(1.0 / 60.0, &mut cam, i as f32 / 60.0, &mut renderer);
@@ -674,6 +677,11 @@ struct Play {
     heading: f32,
     center: [f32; 3],
     running: bool,
+    /// Seconds into the attack clip while one is playing.
+    attack: Option<f32>,
+    /// Seconds into the current clip, and which clip that was.
+    clip_time: f32,
+    clip: usize,
 }
 
 const RUN_SPEED: f32 = 350.0;
@@ -681,6 +689,15 @@ const RUN_SPEED: f32 = 350.0;
 impl Play {
     fn step(&mut self, dt: f32, cam: &mut Camera, clock: f32, renderer: &mut Renderer) {
         let [w, a, s, d] = self.keys;
+        // Attacks root the character until the clip ends.
+        let attack_len = renderer.anim.as_ref().and_then(|an| an.clips.get(2)).map(|c| c.length / c.fps);
+        if let Some(t) = self.attack.as_mut() {
+            *t += dt;
+            if attack_len.is_none_or(|l| *t >= l) {
+                self.attack = None;
+            }
+        }
+        let [w, a, s, d] = if self.attack.is_some() { [false; 4] } else { [w, a, s, d] };
         // Screen-relative axes on the ground plane (model x and y map to view x and z).
         let fwd = glam::Vec2::new(-cam.yaw.sin(), -cam.yaw.cos());
         let right = glam::Vec2::new(cam.yaw.cos(), -cam.yaw.sin());
@@ -697,13 +714,19 @@ impl Play {
             self.heading += diff;
         }
         if let Some(anim) = renderer.anim.as_mut() {
-            let want = self.running as usize;
+            let want = if self.attack.is_some() { 2 } else { self.running as usize };
             if anim.current != want && want < anim.clips.len() {
                 anim.current = want;
             }
+            if anim.current != self.clip {
+                self.clip = anim.current;
+                self.clip_time = 0.0;
+            }
         }
+        self.clip_time += dt;
         let place = Mat4::from_translation(Vec3::new(self.pos.x, self.pos.y, 0.0)) * Mat4::from_rotation_z(self.heading);
-        renderer.animate(clock, place);
+        let _ = clock;
+        renderer.animate(self.clip_time, place);
         let c = self.center;
         cam.target = Vec3::new(self.pos.x - c[0], c[2] + 90.0, self.pos.y - c[1]);
     }
@@ -759,12 +782,12 @@ fn show_play(
         sc.radius = 100.0;
     }
     let clips: Vec<Clip> =
-        ["idle_unarmed_01", "run_unarmed_01"].iter().filter_map(|n| load_clip(idx, dir, &format!("{set}:{n}"))).collect();
+        ["idle_unarmed_01", "run_unarmed_01", "attack_hollowpalm_01a"].iter().filter_map(|n| load_clip(idx, dir, &format!("{set}:{n}"))).collect();
     renderer.set_animation(&char_mesh, clips, base, center);
     if let Some(w) = window {
-        w.set_title(&format!("openPOE2 - {character} in {world} (WASD move, drag orbit, wheel zoom)"));
+        w.set_title(&format!("openPOE2 - {character} in {world} (WASD move, Space attack, drag orbit, wheel zoom)"));
     }
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0 })
 }
 
 impl ApplicationHandler for App {
@@ -821,6 +844,15 @@ impl ApplicationHandler for App {
                 };
                 if let Some(p) = self.play.as_mut() {
                     p.keys[slot] = event.state == ElementState::Pressed;
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if self.play.is_some() && event.state == ElementState::Pressed && event.physical_key == PhysicalKey::Code(KeyCode::Space) =>
+            {
+                if let Some(p) = self.play.as_mut() {
+                    if p.attack.is_none() {
+                        p.attack = Some(0.0);
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => match event.logical_key {
