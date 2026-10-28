@@ -17,7 +17,7 @@ use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -90,12 +90,19 @@ struct Scene {
 }
 
 /// A character pose driven by an animation clip, skinned on the CPU every frame.
-struct Anim {
-    skeleton: Arc<poe2_bundles::skeleton::Skeleton>,
+struct Clip {
     tracks: Vec<poe2_bundles::skeleton::Track>,
     fps: f32,
     /// Clip length in frames.
     length: f32,
+}
+
+struct Anim {
+    skeleton: Arc<poe2_bundles::skeleton::Skeleton>,
+    clips: Vec<Clip>,
+    current: usize,
+    /// Index of the character's first vertex in the scene's vertex buffer.
+    base: usize,
     rest_pos: Vec<[f32; 3]>,
     rest_nor: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
@@ -320,57 +327,59 @@ impl Renderer {
         self.scene = Some(Scene { vertices: vertex_buf, indices: index_buf, draws, radius: radius.max(1e-3) });
     }
 
-    /// Drive the current model with an animation clip.
-    fn set_animation(&mut self, mesh: &mesh::Mesh, tracks: Vec<poe2_bundles::skeleton::Track>, fps: f32) {
+    /// Drive the character stored at vertex `base` of the current scene with
+    /// animation clips. `center` is the centre used when the scene was uploaded.
+    fn set_animation(&mut self, mesh: &mesh::Mesh, clips: Vec<Clip>, base: usize, center: [f32; 3]) {
         let Some(skeleton) = mesh.rig.clone() else { return };
-        if mesh.joints.len() != mesh.positions.len() {
+        if mesh.joints.len() != mesh.positions.len() || clips.is_empty() {
             return;
         }
-        let b = mesh.bbox;
-        let length = tracks.iter().flat_map(|t| t.rotations.iter().map(|k| k[0])).fold(1.0f32, f32::max);
         self.anim = Some(Anim {
             skeleton,
-            tracks,
-            fps,
-            length,
+            clips,
+            current: 0,
+            base,
             rest_pos: mesh.positions.clone(),
             rest_nor: mesh.normals.clone(),
             uvs: mesh.uvs.clone(),
             joints: mesh.joints.clone(),
             weights: mesh.weights.clone(),
-            center: [(b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0, (b[4] + b[5]) / 2.0],
+            center,
         });
     }
 
-    /// Pose the model at `seconds` into the (looping) clip.
-    fn animate(&self, seconds: f32) {
+    /// Pose the character at `seconds` into the (looping) clip, then move it by `place`.
+    fn animate(&self, seconds: f32, place: Mat4) {
         let (Some(a), Some(scene)) = (&self.anim, &self.scene) else { return };
-        let frame = (seconds * a.fps) % a.length;
-        let skin = a.skeleton.skin_matrices(&a.skeleton.pose(&a.tracks, frame));
+        let clip = &a.clips[a.current];
+        let frame = (seconds * clip.fps) % clip.length;
+        let skin = a.skeleton.skin_matrices(&a.skeleton.pose(&clip.tracks, frame));
         let c = a.center;
         let to_view = |v: Vec3| [v.x, -v.z, v.y];
         let vertices: Vec<Vertex> = (0..a.rest_pos.len())
             .map(|i| {
-                let mut m = glam::Mat4::ZERO;
+                let mut m = Mat4::ZERO;
                 for k in 0..4 {
                     let w = a.weights[i][k] as f32 / 255.0;
                     if w > 0.0 {
-                        m += skin.get(a.joints[i][k] as usize).copied().unwrap_or(glam::Mat4::IDENTITY) * w;
+                        m += skin.get(a.joints[i][k] as usize).copied().unwrap_or(Mat4::IDENTITY) * w;
                     }
                 }
+                let m = place * m;
                 let p = m.transform_point3(Vec3::from(a.rest_pos[i])) - Vec3::from(c);
                 let n = m.transform_vector3(Vec3::from(a.rest_nor[i])).normalize_or_zero();
                 Vertex { pos: to_view(p), normal: to_view(n), uv: a.uvs[i] }
             })
             .collect();
-        self.queue.write_buffer(&scene.vertices, 0, bytemuck::cast_slice(&vertices));
+        let offset = (a.base * std::mem::size_of::<Vertex>()) as u64;
+        self.queue.write_buffer(&scene.vertices, offset, bytemuck::cast_slice(&vertices));
     }
 
     fn render(&self, color: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32), cam: &Camera) {
         let aspect = size.0 as f32 / size.1.max(1) as f32;
         let r = self.scene.as_ref().map_or(1.0, |s| s.radius);
         let proj = perspective(40f32.to_radians(), aspect, r * 0.05, r * 40.0);
-        let view = look_at(cam.eye(r), Vec3::ZERO, Vec3::Y);
+        let view = look_at(cam.eye(r) + cam.target, cam.target, Vec3::Y);
         let g = Globals { view_proj: (proj * view).to_cols_array_2d(), light: [0.4, 0.7, 0.6, 0.0] };
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
 
@@ -455,6 +464,8 @@ struct Camera {
     yaw: f32,
     pitch: f32,
     zoom: f32,
+    /// Point the camera orbits, in view space.
+    target: Vec3,
 }
 
 impl Camera {
@@ -476,40 +487,83 @@ async fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::
         .await?)
 }
 
-/// Load an animation clip from `set[:name-part]` (default: the first idle clip).
-fn load_clip(idx: &Index, dir: &std::path::Path, spec: &str) -> Option<(Vec<poe2_bundles::skeleton::Track>, f32)> {
+/// Load an animation clip from `set[:name]` (default: the first clip with "idle" in its name).
+/// An exact name wins over a partial match.
+fn load_clip(idx: &Index, dir: &std::path::Path, spec: &str) -> Option<Clip> {
     use poe2_bundles::skeleton::Skeleton;
     let (set, name) = spec.split_once(':').unwrap_or((spec, "idle"));
     let bytes = idx.read_file(dir, &format!("art/models/charactersfour/animations/{set}/onerig.ast")).ok()?;
     let sk = Skeleton::parse(&bytes).ok()?;
     let name = name.to_ascii_lowercase();
-    let clip = sk.animations.iter().find(|a| a.name.to_ascii_lowercase().contains(&name))?;
+    let clip = sk
+        .animations
+        .iter()
+        .find(|a| a.name.to_ascii_lowercase() == name)
+        .or_else(|| sk.animations.iter().find(|a| a.name.to_ascii_lowercase().contains(&name)))?;
     println!("animation {set}/{} ({} fps)", clip.name, clip.framerate);
-    Some((sk.tracks(clip).ok()?, clip.framerate as f32))
+    let tracks = sk.tracks(clip).ok()?;
+    let length = tracks.iter().flat_map(|t| t.rotations.iter().map(|k| k[0])).fold(1.0f32, f32::max);
+    Some(Clip { tracks, fps: clip.framerate as f32, length })
 }
 
-fn screenshot(
-    mesh: &mesh::Mesh,
-    textures: &[Option<model::ShapeTex>],
-    clip: Option<(Vec<poe2_bundles::skeleton::Track>, f32)>,
-    time: f32,
-    size: (u32, u32),
-    yaw: f32,
-    out: &str,
-) -> Result<()> {
+fn mesh_center(mesh: &mesh::Mesh) -> [f32; 3] {
+    let b = mesh.bbox;
+    [(b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0, (b[4] + b[5]) / 2.0]
+}
+
+fn offscreen_renderer() -> Result<Renderer> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
         .context("no graphics adapter")?;
     println!("adapter: {}", adapter.get_info().name);
     let (device, queue) = pollster::block_on(request_device(&adapter))?;
-    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let mut renderer = Renderer::new(device, queue, format);
-    renderer.set_model(mesh, textures);
-    if let Some((tracks, fps)) = clip {
-        renderer.set_animation(mesh, tracks, fps);
-        renderer.animate(time);
-    }
+    Ok(Renderer::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb))
+}
 
+fn screenshot(
+    mesh: &mesh::Mesh,
+    textures: &[Option<model::ShapeTex>],
+    clip: Option<Clip>,
+    time: f32,
+    size: (u32, u32),
+    yaw: f32,
+    out: &str,
+) -> Result<()> {
+    let mut renderer = offscreen_renderer()?;
+    renderer.set_model(mesh, textures);
+    if let Some(clip) = clip {
+        renderer.set_animation(mesh, vec![clip], 0, mesh_center(mesh));
+        renderer.animate(time, Mat4::IDENTITY);
+    }
+    capture(&renderer, size, &Camera { yaw, pitch: 0.25, zoom: 1.0, target: Vec3::ZERO }, out)
+}
+
+/// Render the character standing (or, with `run`, running for `seconds`) in a world.
+fn screenshot_world(
+    idx: &Index,
+    dir: &std::path::Path,
+    world: &str,
+    character: &str,
+    seconds: f32,
+    run: bool,
+    size: (u32, u32),
+    yaw: f32,
+    out: &str,
+) -> Result<()> {
+    let mut renderer = offscreen_renderer()?;
+    let mut play = show_play(idx, dir, world, character, "baseunarmed", &mut renderer, None).context("loading the world")?;
+    let mut cam = Camera { yaw, pitch: 0.6, zoom: 1.0, target: Vec3::ZERO };
+    // Walk forward in small steps so the camera and pose settle like in the window.
+    play.keys[0] = run;
+    let steps = (seconds * 60.0).max(1.0) as u32;
+    for i in 0..steps {
+        play.step(1.0 / 60.0, &mut cam, i as f32 / 60.0, &mut renderer);
+    }
+    capture(&renderer, size, &cam, out)
+}
+
+fn capture(renderer: &Renderer, size: (u32, u32), cam: &Camera, out: &str) -> Result<()> {
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let color = renderer.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen"),
         size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
@@ -521,7 +575,7 @@ fn screenshot(
         view_formats: &[],
     });
     let depth = renderer.depth_view(size);
-    renderer.render(&color.create_view(&Default::default()), &depth, size, &Camera { yaw, pitch: 0.25, zoom: 1.0 });
+    renderer.render(&color.create_view(&Default::default()), &depth, size, cam);
 
     let row = (size.0 * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let buf = renderer.device.create_buffer(&wgpu::BufferDescriptor {
@@ -577,6 +631,8 @@ struct App {
     last_frame: Instant,
     anim_spec: Option<String>,
     clock: f32,
+    world: Option<String>,
+    play: Option<Play>,
 }
 
 /// Load `list[pos]` into the renderer and describe it in the window title.
@@ -596,8 +652,8 @@ fn show(idx: &Index, dir: &std::path::Path, list: &[String], pos: usize, anim: O
             ));
             renderer.set_model(&mesh, &tex);
             if let (Some(spec), Some(_)) = (anim, &mesh.rig) {
-                if let Some((tracks, fps)) = load_clip(idx, dir, spec) {
-                    renderer.set_animation(&mesh, tracks, fps);
+                if let Some(clip) = load_clip(idx, dir, spec) {
+                    renderer.set_animation(&mesh, vec![clip], 0, mesh_center(&mesh));
                 }
             }
         }
@@ -607,6 +663,107 @@ fn show(idx: &Index, dir: &std::path::Path, list: &[String], pos: usize, anim: O
             renderer.scene = None;
         }
     }
+}
+
+/// A character walking around a loaded world with WASD.
+struct Play {
+    keys: [bool; 4],
+    /// Position on the ground plane (model space).
+    pos: glam::Vec2,
+    heading: f32,
+    center: [f32; 3],
+    running: bool,
+}
+
+const RUN_SPEED: f32 = 350.0;
+
+impl Play {
+    fn step(&mut self, dt: f32, cam: &mut Camera, clock: f32, renderer: &mut Renderer) {
+        let [w, a, s, d] = self.keys;
+        // Screen-relative axes on the ground plane (model x and y map to view x and z).
+        let fwd = glam::Vec2::new(-cam.yaw.sin(), -cam.yaw.cos());
+        let right = glam::Vec2::new(cam.yaw.cos(), -cam.yaw.sin());
+        let dir = fwd * (w as i32 - s as i32) as f32 + right * (d as i32 - a as i32) as f32;
+        self.running = dir.length_squared() > 0.0;
+        if self.running {
+            let dir = dir.normalize();
+            self.pos += dir * RUN_SPEED * dt;
+            // The model faces -Y; turn smoothly towards the movement direction.
+            let want = dir.x.atan2(-dir.y);
+            let tau = std::f32::consts::TAU;
+            let mut diff = (want - self.heading + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI;
+            diff *= (dt * 12.0).min(1.0);
+            self.heading += diff;
+        }
+        if let Some(anim) = renderer.anim.as_mut() {
+            let want = self.running as usize;
+            if anim.current != want && want < anim.clips.len() {
+                anim.current = want;
+            }
+        }
+        let place = Mat4::from_translation(Vec3::new(self.pos.x, self.pos.y, 0.0)) * Mat4::from_rotation_z(self.heading);
+        renderer.animate(clock, place);
+        let c = self.center;
+        cam.target = Vec3::new(self.pos.x - c[0], c[2] + 90.0, self.pos.y - c[1]);
+    }
+}
+
+/// Load the world and the character into one scene; returns the play state.
+fn show_play(
+    idx: &Index,
+    dir: &std::path::Path,
+    world: &str,
+    character: &str,
+    set: &str,
+    renderer: &mut Renderer,
+    window: Option<&Window>,
+) -> Option<Play> {
+    let load = |path: &str| -> Option<(mesh::Mesh, Vec<Option<model::ShapeTex>>)> {
+        match model::load_mesh(idx, dir, path) {
+            Ok(m) => {
+                let t = model::load_shape_textures(idx, dir, path, &m);
+                Some((m, t))
+            }
+            Err(e) => {
+                println!("{path}: {e:#}");
+                None
+            }
+        }
+    };
+    let (world_mesh, mut textures) = load(world)?;
+    let (char_mesh, char_tex) = load(character)?;
+    let wb = world_mesh.bbox;
+    let start = glam::Vec2::new((wb[0] + wb[1]) / 2.0, (wb[2] + wb[3]) / 2.0);
+    let base = world_mesh.positions.len();
+
+    let mut all = world_mesh;
+    all.joints.clear();
+    all.weights.clear();
+    all.positions.extend_from_slice(&char_mesh.positions);
+    all.normals.extend_from_slice(&char_mesh.normals);
+    all.uvs.extend_from_slice(&char_mesh.uvs);
+    let first = all.indices.len() as u32;
+    all.indices.extend(char_mesh.indices.iter().map(|i| i + base as u32));
+    all.shapes.extend(char_mesh.shapes.iter().map(|s| {
+        let mut s = s.clone();
+        s.first_index += first;
+        s
+    }));
+    textures.extend(char_tex);
+    poe2_bundles::room::recompute_bbox(&mut all);
+    let center = mesh_center(&all);
+
+    renderer.set_model(&all, &textures);
+    if let Some(sc) = renderer.scene.as_mut() {
+        sc.radius = 100.0;
+    }
+    let clips: Vec<Clip> =
+        ["idle_unarmed_01", "run_unarmed_01"].iter().filter_map(|n| load_clip(idx, dir, &format!("{set}:{n}"))).collect();
+    renderer.set_animation(&char_mesh, clips, base, center);
+    if let Some(w) = window {
+        w.set_title(&format!("openPOE2 - {character} in {world} (WASD move, drag orbit, wheel zoom)"));
+    }
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false })
 }
 
 impl ApplicationHandler for App {
@@ -636,7 +793,13 @@ impl ApplicationHandler for App {
         }
         surface.configure(&device, &config);
         let mut renderer = Renderer::new(device, queue, config.format);
-        show(&self.idx, &self.dir, &self.list, self.pos, self.anim_spec.as_deref(), &mut renderer, &window);
+        if let Some(world) = self.world.clone() {
+            self.play = show_play(&self.idx, &self.dir, &world, &self.list[self.pos], "baseunarmed", &mut renderer, Some(&window));
+            self.cam.pitch = 0.6;
+            self.auto_rotate = false;
+        } else {
+            show(&self.idx, &self.dir, &self.list, self.pos, self.anim_spec.as_deref(), &mut renderer, &window);
+        }
         let depth = renderer.depth_view((config.width, config.height));
         self.state = Some(Window3d { window, surface, config, depth, renderer });
     }
@@ -645,6 +808,20 @@ impl ApplicationHandler for App {
         let Some(st) = self.state.as_mut() else { return };
         match event {
             WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::KeyboardInput { event, .. }
+                if self.play.is_some()
+                    && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD)) =>
+            {
+                let slot = match event.physical_key {
+                    PhysicalKey::Code(KeyCode::KeyW) => 0,
+                    PhysicalKey::Code(KeyCode::KeyA) => 1,
+                    PhysicalKey::Code(KeyCode::KeyS) => 2,
+                    _ => 3,
+                };
+                if let Some(p) = self.play.as_mut() {
+                    p.keys[slot] = event.state == ElementState::Pressed;
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => match event.logical_key {
                 Key::Named(NamedKey::Escape) => el.exit(),
                 Key::Named(NamedKey::Space) => self.auto_rotate = !self.auto_rotate,
@@ -694,7 +871,11 @@ impl ApplicationHandler for App {
                 let dt = (now - self.last_frame).as_secs_f32();
                 self.last_frame = now;
                 self.clock += dt;
-                st.renderer.animate(self.clock);
+                if let Some(play) = self.play.as_mut() {
+                    play.step(dt, &mut self.cam, self.clock, &mut st.renderer);
+                } else {
+                    st.renderer.animate(self.clock, Mat4::IDENTITY);
+                }
                 if self.auto_rotate && !self.dragging {
                     self.cam.yaw += dt * 0.5;
                 }
@@ -719,7 +900,7 @@ fn main() -> Result<()> {
     anyhow::ensure!(
         a.len() >= 3,
         "usage: viewer <Bundles2> <model | @name-filter> [--start N] [--screenshot out.png [yaw]] [--size WxH]
-                      [--anim set[:name]] [--time seconds]
+                      [--anim set[:name]] [--time seconds] [--world room.arm|tile.tgt]
          with a filter, Left/Right step through matching models, PageUp/PageDown jump by 10, Home/End"
     );
     let dir = PathBuf::from(&a[1]);
@@ -755,6 +936,10 @@ fn main() -> Result<()> {
         let out = a.get(i + 1).context("--screenshot needs an output path")?;
         let yaw: f32 = a.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(30.0f32);
         let path = &list[start];
+        if let Some(world) = a.iter().position(|s| s == "--world").and_then(|i| a.get(i + 1)) {
+            let secs: f32 = a.iter().position(|s| s == "--run").and_then(|i| a.get(i + 1)?.parse().ok()).unwrap_or(0.0);
+            return screenshot_world(&idx, &dir, world, path, secs, secs > 0.0, size, yaw.to_radians(), out);
+        }
         let mesh = model::load_mesh(&idx, &dir, path).with_context(|| format!("loading {path}"))?;
         let textures = model::load_shape_textures(&idx, &dir, path, &mesh);
         let clip = a.iter().position(|s| s == "--anim").and_then(|i| a.get(i + 1)).and_then(|spec| load_clip(&idx, &dir, spec));
@@ -776,13 +961,15 @@ fn main() -> Result<()> {
         list,
         pos: start,
         state: None,
-        cam: Camera { yaw: 0.5, pitch: 0.25, zoom: 1.0 },
+        cam: Camera { yaw: 0.5, pitch: 0.25, zoom: 1.0, target: Vec3::ZERO },
         auto_rotate: true,
         dragging: false,
         last_cursor: None,
         last_frame: Instant::now(),
         anim_spec: a.iter().position(|s| s == "--anim").and_then(|i| a.get(i + 1)).cloned(),
         clock: 0.0,
+        world: a.iter().position(|s| s == "--world").and_then(|i| a.get(i + 1)).cloned(),
+        play: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
