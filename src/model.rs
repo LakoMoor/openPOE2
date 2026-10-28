@@ -92,6 +92,43 @@ pub fn load_mesh(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
     Ok(out)
 }
 
+/// Ground materials of an area: its `master.tsi` names a `materials.mtd`, which
+/// maps ground type names to materials.
+struct AreaGround {
+    by_name: std::collections::HashMap<String, String>,
+}
+
+impl AreaGround {
+    fn load(idx: &Index, dir: &Path, room_path: &str) -> Self {
+        let mut by_name = std::collections::HashMap::new();
+        let mut parts: Vec<&str> = room_path.split('/').collect();
+        while parts.pop().is_some() && !parts.is_empty() {
+            let area = parts.join("/");
+            let Ok(tsi) = idx.read_file(dir, &format!("{area}/master.tsi")) else { continue };
+            let text = String::from_utf16_lossy(
+                &tsi.strip_prefix(&[0xff, 0xfe]).unwrap_or(&tsi).chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>(),
+            );
+            let list = text.lines().find(|l| l.trim_start().starts_with("MaterialsList")).and_then(|l| l.split('"').nth(1).map(str::to_string));
+            if let Some(mtd) = list.and_then(|f| idx.read_file(dir, &format!("{area}/{f}")).ok()) {
+                by_name = crate::ground::parse_mtd(&mtd);
+            }
+            break;
+        }
+        Self { by_name }
+    }
+
+    /// Material for the ground type stored in `gt_path`.
+    fn material(&self, idx: &Index, dir: &Path, gt_path: &str) -> String {
+        let name = idx
+            .read_file(dir, gt_path)
+            .ok()
+            .and_then(|b| crate::ground::gt_name(&b))
+            .map(|n| n.to_ascii_lowercase())
+            .unwrap_or_default();
+        self.by_name.get(&name).or_else(|| self.by_name.get("")).cloned().unwrap_or_default()
+    }
+}
+
 /// A room: a ground plane with its doodads placed on it.
 fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
     use crate::room;
@@ -99,7 +136,12 @@ fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
     let r = room::parse_arm(&idx.read_file(dir, path)?)?;
     let mut out = Mesh::default();
     let side = r.side.unwrap_or(2).max(1) as f32 * room::CELLS_PER_SIDE as f32 * room::CELL;
-    room::ground_quad(&mut out, side);
+    if r.slots.is_empty() {
+        room::ground_quad(&mut out, side);
+    } else {
+        let ground = AreaGround::load(idx, dir, path);
+        room::ground_from_slots(&mut out, &r.slots, &|gt: &str| ground.material(idx, dir, gt));
+    }
 
     let mut cache: HashMap<String, Option<Mesh>> = HashMap::new();
     let mut placed = 0;
@@ -111,6 +153,11 @@ fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
         else {
             continue;
         };
+        // Blockers and other editor helpers are invisible in the game.
+        let lower = mesh_path.to_ascii_lowercase();
+        if lower.contains("blocker") || lower.contains("/tools/") {
+            continue;
+        }
         let part = cache.entry(mesh_path.clone()).or_insert_with(|| load_mesh(idx, dir, &mesh_path).ok());
         if let Some(part) = part {
             room::append_placed(&mut out, part, d.rotation, d.scale, [d.x * room::CELL, d.y * room::CELL, 0.0]);
