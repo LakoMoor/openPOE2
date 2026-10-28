@@ -84,6 +84,8 @@ pub fn load_mesh(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
             let line = ((tgt.size.1 - row) * tgt.size.0 + (col - 1)) as usize;
             let slots = tgt.subtile_runs.get(line).map(|r| crate::terrain::expand_runs(r)).unwrap_or_default();
             crate::terrain::append(&mut out, &tgm.main, &slots, &tgt.materials);
+            // The ground layer has no material list in the .tgt; draw it untextured.
+            crate::terrain::append(&mut out, &tgm.ground, &[], &tgt.materials);
         }
     }
     out.bbox = bbox.unwrap_or_default();

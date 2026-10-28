@@ -187,10 +187,11 @@ pub fn append(out: &mut Mesh, part: &Mesh, slots: &[u32], materials: &[String]) 
     out.normals.extend_from_slice(&part.normals);
     out.uvs.extend_from_slice(&part.uvs);
     out.indices.extend(part.indices.iter().map(|i| i + base));
-    for (sh, &slot) in part.shapes.iter().zip(slots) {
+    // Shapes without a slot are left untextured.
+    for (i, sh) in part.shapes.iter().enumerate() {
         out.shapes.push(Shape {
             name: sh.name.clone(),
-            material: materials.get(slot as usize).cloned().unwrap_or_default(),
+            material: slots.get(i).and_then(|&s| materials.get(s as usize)).cloned().unwrap_or_default(),
             first_index: first + sh.first_index,
             index_count: sh.index_count,
         });
