@@ -137,6 +137,42 @@ fn load_skin(idx: &Index, dir: &Path, sm_path: &str, overrides: &std::collection
     Ok(mesh)
 }
 
+/// Names of base shapes in `list` that `piece` covers: at least half of a shape's
+/// vertices lie close to some vertex of the piece. Upper arms always stay.
+fn covered_shapes(base: &Mesh, piece: &Mesh, xf: &glam::Mat4, list: &[String]) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+    const R: f32 = 4.0;
+    let cell = |p: glam::Vec3| [(p.x / R).floor() as i32, (p.y / R).floor() as i32, (p.z / R).floor() as i32];
+    let mut grid: HashMap<[i32; 3], Vec<glam::Vec3>> = HashMap::new();
+    for p in &piece.positions {
+        let p = xf.transform_point3(glam::Vec3::from(*p));
+        grid.entry(cell(p)).or_default().push(p);
+    }
+    let near = |p: glam::Vec3| {
+        let c = cell(p);
+        (-1..=1).any(|dx| {
+            (-1..=1).any(|dy| {
+                (-1..=1).any(|dz| {
+                    grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]).is_some_and(|v| v.iter().any(|q| q.distance(p) <= R))
+                })
+            })
+        })
+    };
+    let mut out = Vec::new();
+    for s in &base.shapes {
+        if !list.contains(&s.name) || s.name.contains("upperArm") {
+            continue;
+        }
+        let range = s.first_index as usize..(s.first_index + s.index_count) as usize;
+        let verts: HashSet<u32> = base.indices[range].iter().copied().collect();
+        let close = verts.iter().filter(|&&i| near(glam::Vec3::from(base.positions[i as usize]))).count();
+        if close * 2 >= verts.len() {
+            out.push(s.name.clone());
+        }
+    }
+    out
+}
+
 /// A character in its rest pose: the base body plus outfit pieces. Outfit pieces
 /// replace the matching base segments (body, gloves, boots); pieces attached to
 /// a bone or socket are moved to that bone's rest position.
@@ -198,7 +234,9 @@ fn load_character(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
                 if !matches!(slot, "" | "Head" | "Face") {
                     if let Some(list) = root.segments.get(&format!("{slot}_Seg")) {
                         // Keep the upper arms: outfit bodies don't cover them.
-                        hidden.extend(list.iter().filter(|n| !n.contains("upperArm")).cloned());
+                        if let Some(base_mesh) = parts.first().map(|p| &p.0) {
+                            hidden.extend(covered_shapes(base_mesh, &m, &xf, list));
+                        }
                     }
                 }
                 // Pieces attached to a bone (hair, necklace, tassle) are skinned to their own
