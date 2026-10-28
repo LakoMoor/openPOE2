@@ -95,7 +95,9 @@ struct Renderer {
     pipeline: wgpu::RenderPipeline,
     globals: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
-    scene: Scene,
+    shape_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    scene: Option<Scene>,
 }
 
 /// Build the mip chain of `img` (level 0 first).
@@ -114,8 +116,6 @@ impl Renderer {
         device: wgpu::Device,
         queue: wgpu::Queue,
         target: wgpu::TextureFormat,
-        mesh: &mesh::Mesh,
-        textures: &[Option<model::ShapeTex>],
     ) -> Self {
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals"),
@@ -206,6 +206,22 @@ impl Renderer {
             cache: None,
         });
 
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
+        Self { device, queue, pipeline, globals, globals_bind, shape_layout, sampler, scene: None }
+    }
+
+    /// Replace the displayed model.
+    fn set_model(&mut self, mesh: &mesh::Mesh, textures: &[Option<model::ShapeTex>]) {
+        let (device, queue) = (&self.device, &self.queue);
+        let (shape_layout, sampler) = (&self.shape_layout, &self.sampler);
         // Centre the model and turn its Z-down axes into Y-up.
         let b = mesh.bbox;
         let c = [(b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0, (b[4] + b[5]) / 2.0];
@@ -233,15 +249,6 @@ impl Renderer {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            anisotropy_clamp: 8,
-            ..Default::default()
-        });
         let white = RgbaImage::from_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
 
         let draws = mesh
@@ -255,7 +262,7 @@ impl Renderer {
                 };
                 let levels = mip_chain(img);
                 let texture = device.create_texture_with_data(
-                    &queue,
+                    queue,
                     &wgpu::TextureDescriptor {
                         label: Some("shape texture"),
                         size: wgpu::Extent3d { width: img.width(), height: img.height(), depth_or_array_layers: 1 },
@@ -277,7 +284,7 @@ impl Renderer {
                 });
                 let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("shape bind"),
-                    layout: &shape_layout,
+                    layout: shape_layout,
                     entries: &[
                         wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
                         wgpu::BindGroupEntry {
@@ -286,26 +293,19 @@ impl Renderer {
                                 &texture.create_view(&wgpu::TextureViewDescriptor::default()),
                             ),
                         },
-                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
                     ],
                 });
                 Draw { first_index: shape.first_index, index_count: shape.index_count, bind }
             })
             .collect();
 
-        Self {
-            device,
-            queue,
-            pipeline,
-            globals,
-            globals_bind,
-            scene: Scene { vertices: vertex_buf, indices: index_buf, draws, radius: radius.max(1e-3) },
-        }
+        self.scene = Some(Scene { vertices: vertex_buf, indices: index_buf, draws, radius: radius.max(1e-3) });
     }
 
     fn render(&self, color: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32), cam: &Camera) {
         let aspect = size.0 as f32 / size.1.max(1) as f32;
-        let r = self.scene.radius;
+        let r = self.scene.as_ref().map_or(1.0, |s| s.radius);
         let proj = perspective(40f32.to_radians(), aspect, r * 0.05, r * 40.0);
         let view = look_at(cam.eye(r), Vec3::ZERO, Vec3::Y);
         let g = Globals { view_proj: (proj * view).to_cols_array_2d(), light: [0.4, 0.7, 0.6, 0.0] };
@@ -335,11 +335,13 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.globals_bind, &[]);
-            pass.set_vertex_buffer(0, self.scene.vertices.slice(..));
-            pass.set_index_buffer(self.scene.indices.slice(..), wgpu::IndexFormat::Uint32);
-            for d in &self.scene.draws {
-                pass.set_bind_group(1, &d.bind, &[]);
-                pass.draw_indexed(d.first_index..d.first_index + d.index_count, 0, 0..1);
+            if let Some(scene) = &self.scene {
+                pass.set_vertex_buffer(0, scene.vertices.slice(..));
+                pass.set_index_buffer(scene.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for d in &scene.draws {
+                    pass.set_bind_group(1, &d.bind, &[]);
+                    pass.draw_indexed(d.first_index..d.first_index + d.index_count, 0, 0..1);
+                }
             }
         }
         self.queue.submit([enc.finish()]);
@@ -418,7 +420,8 @@ fn screenshot(mesh: &mesh::Mesh, textures: &[Option<model::ShapeTex>], size: (u3
     println!("adapter: {}", adapter.get_info().name);
     let (device, queue) = pollster::block_on(request_device(&adapter))?;
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let renderer = Renderer::new(device, queue, format, mesh, textures);
+    let mut renderer = Renderer::new(device, queue, format);
+    renderer.set_model(mesh, textures);
 
     let color = renderer.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen"),
@@ -475,9 +478,10 @@ struct Window3d {
 }
 
 struct App {
-    mesh: mesh::Mesh,
-    textures: Vec<Option<model::ShapeTex>>,
-    title: String,
+    idx: Index,
+    dir: PathBuf,
+    list: Vec<String>,
+    pos: usize,
     state: Option<Window3d>,
     cam: Camera,
     auto_rotate: bool,
@@ -486,13 +490,38 @@ struct App {
     last_frame: Instant,
 }
 
+/// Load `list[pos]` into the renderer and describe it in the window title.
+fn show(idx: &Index, dir: &std::path::Path, list: &[String], pos: usize, renderer: &mut Renderer, window: &Window) {
+    let path = &list[pos];
+    let result = idx.read_file(dir, path).and_then(|d| mesh::parse(path, &d));
+    match result {
+        Ok(mesh) => {
+            let tex = model::load_shape_textures(idx, dir, path, &mesh);
+            window.set_title(&format!(
+                "openPOE2 [{}/{}] {path} - {} triangles, {}/{} textured",
+                pos + 1,
+                list.len(),
+                mesh.indices.len() / 3,
+                tex.iter().flatten().count(),
+                tex.len()
+            ));
+            renderer.set_model(&mesh, &tex);
+        }
+        Err(e) => {
+            println!("{path}: {e:#}");
+            window.set_title(&format!("openPOE2 [{}/{}] {path} - cannot load: {e}", pos + 1, list.len()));
+            renderer.scene = None;
+        }
+    }
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.state.is_some() {
             return;
         }
         let window = Arc::new(
-            el.create_window(Window::default_attributes().with_title(self.title.clone()).with_inner_size(winit::dpi::LogicalSize::new(1100, 800)))
+            el.create_window(Window::default_attributes().with_title("openPOE2").with_inner_size(winit::dpi::LogicalSize::new(1100, 800)))
                 .expect("create window"),
         );
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(el.owned_display_handle())));
@@ -512,7 +541,8 @@ impl ApplicationHandler for App {
             config.format = f;
         }
         surface.configure(&device, &config);
-        let renderer = Renderer::new(device, queue, config.format, &self.mesh, &self.textures);
+        let mut renderer = Renderer::new(device, queue, config.format);
+        show(&self.idx, &self.dir, &self.list, self.pos, &mut renderer, &window);
         let depth = renderer.depth_view((config.width, config.height));
         self.state = Some(Window3d { window, surface, config, depth, renderer });
     }
@@ -524,6 +554,19 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => match event.logical_key {
                 Key::Named(NamedKey::Escape) => el.exit(),
                 Key::Named(NamedKey::Space) => self.auto_rotate = !self.auto_rotate,
+                Key::Named(k @ (NamedKey::ArrowRight | NamedKey::ArrowLeft | NamedKey::PageDown | NamedKey::PageUp | NamedKey::Home | NamedKey::End)) => {
+                    let n = self.list.len();
+                    self.pos = match k {
+                        NamedKey::ArrowRight => (self.pos + 1) % n,
+                        NamedKey::ArrowLeft => (self.pos + n - 1) % n,
+                        NamedKey::PageDown => (self.pos + 10) % n,
+                        NamedKey::PageUp => (self.pos + n - 10 % n) % n,
+                        NamedKey::Home => 0,
+                        _ => n - 1,
+                    };
+                    self.cam.zoom = 1.0;
+                    show(&self.idx, &self.dir, &self.list, self.pos, &mut st.renderer, &st.window);
+                }
                 _ => {}
             },
             WindowEvent::MouseInput { button: MouseButton::Left, state, .. } => {
@@ -577,19 +620,31 @@ impl ApplicationHandler for App {
 
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().collect();
-    anyhow::ensure!(a.len() >= 3, "usage: viewer <Bundles2> <model> [--screenshot out.png [yaw]] [--size WxH]");
+    anyhow::ensure!(
+        a.len() >= 3,
+        "usage: viewer <Bundles2> <model | @name-filter> [--start N] [--screenshot out.png [yaw]] [--size WxH]
+         with a filter, Left/Right step through matching models, PageUp/PageDown jump by 10, Home/End"
+    );
     let dir = PathBuf::from(&a[1]);
     let idx = Index::parse(&std::fs::read(dir.join("_.index.bin"))?)?;
-    let data = idx.read_file(&dir, &a[2])?;
-    let mesh = mesh::parse(&a[2], &data).with_context(|| format!("parsing {}", a[2]))?;
-    let textures = model::load_shape_textures(&idx, &dir, &mesh);
-    println!(
-        "{}: {} triangles, {} shapes, {} textured",
-        a[2],
-        mesh.indices.len() / 3,
-        mesh.shapes.len(),
-        textures.iter().flatten().count()
-    );
+
+    let mut list: Vec<String> = match a[2].strip_prefix('@') {
+        Some(filter) => {
+            let f = filter.to_ascii_lowercase();
+            idx.paths.keys().filter(|p| (p.ends_with(".fmt") || p.ends_with(".smd")) && p.contains(&f)).cloned().collect()
+        }
+        None => vec![a[2].clone()],
+    };
+    list.sort();
+    anyhow::ensure!(!list.is_empty(), "no models match {}", a[2]);
+    let start = a
+        .iter()
+        .position(|s| s == "--start")
+        .and_then(|i| a.get(i + 1)?.parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, list.len())
+        - 1;
+    println!("{} model(s)", list.len());
 
     let size = a
         .iter()
@@ -602,15 +657,26 @@ fn main() -> Result<()> {
     if let Some(i) = a.iter().position(|s| s == "--screenshot") {
         let out = a.get(i + 1).context("--screenshot needs an output path")?;
         let yaw: f32 = a.get(i + 2).and_then(|s| s.parse().ok()).unwrap_or(30.0f32);
+        let path = &list[start];
+        let data = idx.read_file(&dir, path)?;
+        let mesh = mesh::parse(path, &data).with_context(|| format!("parsing {path}"))?;
+        let textures = model::load_shape_textures(&idx, &dir, path, &mesh);
+        println!(
+            "{path}: {} triangles, {} shapes, {} textured",
+            mesh.indices.len() / 3,
+            mesh.shapes.len(),
+            textures.iter().flatten().count()
+        );
         return screenshot(&mesh, &textures, size, yaw.to_radians(), out);
     }
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
-        mesh,
-        textures,
-        title: format!("openPOE2 — {}", a[2]),
+        idx,
+        dir,
+        list,
+        pos: start,
         state: None,
         cam: Camera { yaw: 0.5, pitch: 0.25, zoom: 1.0 },
         auto_rotate: true,

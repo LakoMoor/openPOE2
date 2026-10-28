@@ -31,7 +31,7 @@ fn main() -> Result<()> {
         println!("  shape {:?} material {:?} ({} indices)", s.name, s.material, s.index_count);
     }
 
-    let textures = model::load_shape_textures(&idx, &dir, &m);
+    let textures = model::load_shape_textures(&idx, &dir, &a[2], &m);
     println!("textured shapes: {}/{}", textures.iter().flatten().count(), textures.len());
     // Shape owning each triangle.
     let mut tri_shape = vec![usize::MAX; m.indices.len() / 3];

@@ -7,7 +7,7 @@ use std::path::Path;
 use image::RgbaImage;
 use image_dds::ddsfile::Dds;
 
-use crate::{index::Index, material, mesh::Mesh};
+use crate::{index::Index, material, mesh::Mesh, sm};
 
 pub struct ShapeTex {
     pub img: RgbaImage,
@@ -15,8 +15,27 @@ pub struct ShapeTex {
     pub alpha_test: bool,
 }
 
+/// Material path for each shape. `.fmt` files name them directly; for `.smd`
+/// they come from the companion `.sm`, handed out to shapes in order.
+pub fn shape_materials(idx: &Index, dir: &Path, mesh_path: &str, mesh: &Mesh) -> Vec<String> {
+    let mut mats: Vec<String> = mesh.shapes.iter().map(|s| s.material.clone()).collect();
+    if mats.iter().all(|m| m.is_empty()) {
+        let info = sm::descriptor_path(mesh_path)
+            .and_then(|p| idx.read_file(dir, &p).ok())
+            .and_then(|b| sm::parse(&b).ok())
+            .filter(|i| i.mesh.eq_ignore_ascii_case(mesh_path));
+        if let Some(info) = info {
+            let expanded = info.materials.iter().flat_map(|(m, n)| std::iter::repeat_n(m.clone(), *n));
+            for (slot, m) in mats.iter_mut().zip(expanded) {
+                *slot = m;
+            }
+        }
+    }
+    mats
+}
+
 /// One entry per shape; `None` when the material or texture can't be resolved.
-pub fn load_shape_textures(idx: &Index, dir: &Path, mesh: &Mesh) -> Vec<Option<ShapeTex>> {
+pub fn load_shape_textures(idx: &Index, dir: &Path, mesh_path: &str, mesh: &Mesh) -> Vec<Option<ShapeTex>> {
     let load = |mat: &str| -> Option<ShapeTex> {
         if mat.is_empty() {
             return None;
@@ -26,5 +45,5 @@ pub fn load_shape_textures(idx: &Index, dir: &Path, mesh: &Mesh) -> Vec<Option<S
         let img = image_dds::image_from_dds(&dds, 0).ok()?;
         Some(ShapeTex { img, alpha_test: !m.opaque })
     };
-    mesh.shapes.iter().map(|s| load(&s.material)).collect()
+    shape_materials(idx, dir, mesh_path, mesh).iter().map(|m| load(m)).collect()
 }
