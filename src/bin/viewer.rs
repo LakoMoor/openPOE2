@@ -89,7 +89,23 @@ struct Scene {
     radius: f32,
 }
 
+/// A character pose driven by an animation clip, skinned on the CPU every frame.
+struct Anim {
+    skeleton: Arc<poe2_bundles::skeleton::Skeleton>,
+    tracks: Vec<poe2_bundles::skeleton::Track>,
+    fps: f32,
+    /// Clip length in frames.
+    length: f32,
+    rest_pos: Vec<[f32; 3]>,
+    rest_nor: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    joints: Vec<[u8; 4]>,
+    weights: Vec<[u8; 4]>,
+    center: [f32; 3],
+}
+
 struct Renderer {
+    anim: Option<Anim>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
@@ -215,7 +231,7 @@ impl Renderer {
             anisotropy_clamp: 8,
             ..Default::default()
         });
-        Self { device, queue, pipeline, globals, globals_bind, shape_layout, sampler, scene: None }
+        Self { anim: None, device, queue, pipeline, globals, globals_bind, shape_layout, sampler, scene: None }
     }
 
     /// Replace the displayed model.
@@ -241,7 +257,7 @@ impl Renderer {
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vertices"),
             contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("indices"),
@@ -300,7 +316,54 @@ impl Renderer {
             })
             .collect();
 
+        self.anim = None;
         self.scene = Some(Scene { vertices: vertex_buf, indices: index_buf, draws, radius: radius.max(1e-3) });
+    }
+
+    /// Drive the current model with an animation clip.
+    fn set_animation(&mut self, mesh: &mesh::Mesh, tracks: Vec<poe2_bundles::skeleton::Track>, fps: f32) {
+        let Some(skeleton) = mesh.rig.clone() else { return };
+        if mesh.joints.len() != mesh.positions.len() {
+            return;
+        }
+        let b = mesh.bbox;
+        let length = tracks.iter().flat_map(|t| t.rotations.iter().map(|k| k[0])).fold(1.0f32, f32::max);
+        self.anim = Some(Anim {
+            skeleton,
+            tracks,
+            fps,
+            length,
+            rest_pos: mesh.positions.clone(),
+            rest_nor: mesh.normals.clone(),
+            uvs: mesh.uvs.clone(),
+            joints: mesh.joints.clone(),
+            weights: mesh.weights.clone(),
+            center: [(b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0, (b[4] + b[5]) / 2.0],
+        });
+    }
+
+    /// Pose the model at `seconds` into the (looping) clip.
+    fn animate(&self, seconds: f32) {
+        let (Some(a), Some(scene)) = (&self.anim, &self.scene) else { return };
+        let frame = (seconds * a.fps) % a.length;
+        let skin = a.skeleton.skin_matrices(&a.skeleton.pose(&a.tracks, frame));
+        let c = a.center;
+        let to_view = |v: Vec3| [v.x, -v.z, v.y];
+        let vertices: Vec<Vertex> = (0..a.rest_pos.len())
+            .map(|i| {
+                let mut m = glam::Mat4::ZERO;
+                for k in 0..4 {
+                    let w = a.weights[i][k] as f32 / 255.0;
+                    if w > 0.0 {
+                        m += skin.get(a.joints[i][k] as usize).copied().unwrap_or(glam::Mat4::IDENTITY) * w;
+                    }
+                }
+                let p = m.transform_point3(Vec3::from(a.rest_pos[i])) - Vec3::from(c);
+                let n = m.transform_vector3(Vec3::from(a.rest_nor[i])).normalize_or_zero();
+                Vertex { pos: to_view(p), normal: to_view(n), uv: a.uvs[i] }
+            })
+            .collect();
+        self.queue.write_buffer(&scene.vertices, 0, bytemuck::cast_slice(&vertices));
     }
 
     fn render(&self, color: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32), cam: &Camera) {
@@ -413,7 +476,27 @@ async fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::
         .await?)
 }
 
-fn screenshot(mesh: &mesh::Mesh, textures: &[Option<model::ShapeTex>], size: (u32, u32), yaw: f32, out: &str) -> Result<()> {
+/// Load an animation clip from `set[:name-part]` (default: the first idle clip).
+fn load_clip(idx: &Index, dir: &std::path::Path, spec: &str) -> Option<(Vec<poe2_bundles::skeleton::Track>, f32)> {
+    use poe2_bundles::skeleton::Skeleton;
+    let (set, name) = spec.split_once(':').unwrap_or((spec, "idle"));
+    let bytes = idx.read_file(dir, &format!("art/models/charactersfour/animations/{set}/onerig.ast")).ok()?;
+    let sk = Skeleton::parse(&bytes).ok()?;
+    let name = name.to_ascii_lowercase();
+    let clip = sk.animations.iter().find(|a| a.name.to_ascii_lowercase().contains(&name))?;
+    println!("animation {set}/{} ({} fps)", clip.name, clip.framerate);
+    Some((sk.tracks(clip).ok()?, clip.framerate as f32))
+}
+
+fn screenshot(
+    mesh: &mesh::Mesh,
+    textures: &[Option<model::ShapeTex>],
+    clip: Option<(Vec<poe2_bundles::skeleton::Track>, f32)>,
+    time: f32,
+    size: (u32, u32),
+    yaw: f32,
+    out: &str,
+) -> Result<()> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
         .context("no graphics adapter")?;
@@ -422,6 +505,10 @@ fn screenshot(mesh: &mesh::Mesh, textures: &[Option<model::ShapeTex>], size: (u3
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mut renderer = Renderer::new(device, queue, format);
     renderer.set_model(mesh, textures);
+    if let Some((tracks, fps)) = clip {
+        renderer.set_animation(mesh, tracks, fps);
+        renderer.animate(time);
+    }
 
     let color = renderer.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen"),
@@ -488,10 +575,12 @@ struct App {
     dragging: bool,
     last_cursor: Option<(f64, f64)>,
     last_frame: Instant,
+    anim_spec: Option<String>,
+    clock: f32,
 }
 
 /// Load `list[pos]` into the renderer and describe it in the window title.
-fn show(idx: &Index, dir: &std::path::Path, list: &[String], pos: usize, renderer: &mut Renderer, window: &Window) {
+fn show(idx: &Index, dir: &std::path::Path, list: &[String], pos: usize, anim: Option<&str>, renderer: &mut Renderer, window: &Window) {
     let path = &list[pos];
     let result = model::load_mesh(idx, dir, path);
     match result {
@@ -506,6 +595,11 @@ fn show(idx: &Index, dir: &std::path::Path, list: &[String], pos: usize, rendere
                 tex.len()
             ));
             renderer.set_model(&mesh, &tex);
+            if let (Some(spec), Some(_)) = (anim, &mesh.rig) {
+                if let Some((tracks, fps)) = load_clip(idx, dir, spec) {
+                    renderer.set_animation(&mesh, tracks, fps);
+                }
+            }
         }
         Err(e) => {
             println!("{path}: {e:#}");
@@ -542,7 +636,7 @@ impl ApplicationHandler for App {
         }
         surface.configure(&device, &config);
         let mut renderer = Renderer::new(device, queue, config.format);
-        show(&self.idx, &self.dir, &self.list, self.pos, &mut renderer, &window);
+        show(&self.idx, &self.dir, &self.list, self.pos, self.anim_spec.as_deref(), &mut renderer, &window);
         let depth = renderer.depth_view((config.width, config.height));
         self.state = Some(Window3d { window, surface, config, depth, renderer });
     }
@@ -565,7 +659,7 @@ impl ApplicationHandler for App {
                         _ => n - 1,
                     };
                     self.cam.zoom = 1.0;
-                    show(&self.idx, &self.dir, &self.list, self.pos, &mut st.renderer, &st.window);
+                    show(&self.idx, &self.dir, &self.list, self.pos, self.anim_spec.as_deref(), &mut st.renderer, &st.window);
                 }
                 _ => {}
             },
@@ -599,6 +693,8 @@ impl ApplicationHandler for App {
                 let now = Instant::now();
                 let dt = (now - self.last_frame).as_secs_f32();
                 self.last_frame = now;
+                self.clock += dt;
+                st.renderer.animate(self.clock);
                 if self.auto_rotate && !self.dragging {
                     self.cam.yaw += dt * 0.5;
                 }
@@ -623,6 +719,7 @@ fn main() -> Result<()> {
     anyhow::ensure!(
         a.len() >= 3,
         "usage: viewer <Bundles2> <model | @name-filter> [--start N] [--screenshot out.png [yaw]] [--size WxH]
+                      [--anim set[:name]] [--time seconds]
          with a filter, Left/Right step through matching models, PageUp/PageDown jump by 10, Home/End"
     );
     let dir = PathBuf::from(&a[1]);
@@ -660,13 +757,15 @@ fn main() -> Result<()> {
         let path = &list[start];
         let mesh = model::load_mesh(&idx, &dir, path).with_context(|| format!("loading {path}"))?;
         let textures = model::load_shape_textures(&idx, &dir, path, &mesh);
+        let clip = a.iter().position(|s| s == "--anim").and_then(|i| a.get(i + 1)).and_then(|spec| load_clip(&idx, &dir, spec));
+        let time: f32 = a.iter().position(|s| s == "--time").and_then(|i| a.get(i + 1)?.parse().ok()).unwrap_or(0.0);
         println!(
             "{path}: {} triangles, {} shapes, {} textured",
             mesh.indices.len() / 3,
             mesh.shapes.len(),
             textures.iter().flatten().count()
         );
-        return screenshot(&mesh, &textures, size, yaw.to_radians(), out);
+        return screenshot(&mesh, &textures, clip, time, size, yaw.to_radians(), out);
     }
 
     let event_loop = EventLoop::new()?;
@@ -682,6 +781,8 @@ fn main() -> Result<()> {
         dragging: false,
         last_cursor: None,
         last_frame: Instant::now(),
+        anim_spec: a.iter().position(|s| s == "--anim").and_then(|i| a.get(i + 1)).cloned(),
+        clock: 0.0,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

@@ -154,13 +154,14 @@ fn load_character(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
         .ok()
         .and_then(|b| Skeleton::parse(&b).ok());
     let sockets = shared.map(|s| s.sockets).unwrap_or_default();
-    let resolve = |name: &str| -> Mat4 {
-        let Some(skel) = &skeleton else { return Mat4::IDENTITY };
+    // Transform of a bone or socket in rest pose, and the bone it ends up on.
+    let resolve = |name: &str| -> (Mat4, usize) {
+        let Some(skel) = &skeleton else { return (Mat4::IDENTITY, 0) };
         let mut name = name.to_string();
         let mut extra = Mat4::IDENTITY;
         for _ in 0..6 {
             if let Some(i) = skel.index_of(&name) {
-                return skel.world(i) * extra;
+                return (skel.world(i) * extra, i);
             }
             match sockets.get(&name.to_ascii_lowercase()) {
                 Some((parent, t)) if !parent.is_empty() => {
@@ -170,22 +171,25 @@ fn load_character(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
                 _ => break,
             }
         }
-        Mat4::IDENTITY
+        (Mat4::IDENTITY, 0)
     };
 
-    // (mesh, is_base, transform)
-    let mut parts: Vec<(Mesh, bool, Mat4)> = Vec::new();
+    // (mesh, is_base, transform, bone for rigid parts)
+    let mut parts: Vec<(Mesh, bool, Mat4, usize)> = Vec::new();
     if let Some(skin) = &root.skin {
-        parts.push((load_skin(idx, dir, skin, &root.shape_materials)?, true, Mat4::IDENTITY));
+        parts.push((load_skin(idx, dir, skin, &root.shape_materials)?, true, Mat4::IDENTITY, 0));
     }
 
     let mut hidden: HashSet<String> = HashSet::new();
-    let mut queue: Vec<(Attachment, usize, Mat4)> = root
+    let mut queue: Vec<(Attachment, usize, Mat4, usize)> = root
         .attachments
         .iter()
-        .map(|a| (a.clone(), 1, if a.bone == "<root>" { Mat4::IDENTITY } else { resolve(&a.bone) }))
+        .map(|a| {
+            let (xf, bone) = if a.bone == "<root>" { (Mat4::IDENTITY, 0) } else { resolve(&a.bone) };
+            (a.clone(), 1, xf, bone)
+        })
         .collect();
-    while let Some((att, depth, xf)) = queue.pop() {
+    while let Some((att, depth, xf, bone)) = queue.pop() {
         let Ok(bytes) = idx.read_file(dir, &att.path) else { continue };
         let Ok(ao) = parse_ao(&bytes) else { continue };
         if let Some(skin) = &ao.skin {
@@ -197,23 +201,41 @@ fn load_character(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
                         hidden.extend(list.iter().filter(|n| !n.contains("upperArm")).cloned());
                     }
                 }
-                parts.push((m, false, xf));
+                // Pieces attached to a bone (hair, necklace, tassle) are skinned to their own
+                // small rig; keep them rigid on the bone they hang from.
+                let m = if att.bone == "<root>" { m } else { Mesh { joints: Vec::new(), weights: Vec::new(), ..m } };
+                parts.push((m, false, xf, bone));
             }
         }
         if depth < 4 {
             queue.extend(ao.attachments.into_iter().map(|a| {
-                let child = if a.bone == "<root>" { xf } else { xf * resolve(&a.bone) };
-                (a, depth + 1, child)
+                if a.bone == "<root>" {
+                    (a, depth + 1, xf, bone)
+                } else {
+                    let (local, b) = resolve(&a.bone);
+                    (a, depth + 1, xf * local, b)
+                }
             }));
         }
     }
 
     let mut out = Mesh::default();
-    for (mesh, is_base, xf) in &parts {
+    for (mesh, is_base, xf, bone) in &parts {
         let base = out.positions.len() as u32;
         out.positions.extend(mesh.positions.iter().map(|p| xf.transform_point3(Vec3::from(*p)).to_array()));
         out.normals.extend(mesh.normals.iter().map(|n| xf.transform_vector3(Vec3::from(*n)).to_array()));
         out.uvs.extend_from_slice(&mesh.uvs);
+        if mesh.joints.len() == mesh.positions.len() {
+            out.joints.extend_from_slice(&mesh.joints);
+            out.weights.extend_from_slice(&mesh.weights);
+        } else {
+            // Rigid piece: follow the bone it is attached to.
+            let rigid = (0..mesh.positions.len()).map(|_| ([*bone as u8, 0, 0, 0], [255, 0, 0, 0]));
+            for (j, w) in rigid {
+                out.joints.push(j);
+                out.weights.push(w);
+            }
+        }
         let first = out.indices.len() as u32;
         out.indices.extend(mesh.indices.iter().map(|i| i + base));
         for s in &mesh.shapes {
@@ -228,6 +250,7 @@ fn load_character(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
             });
         }
     }
+    out.rig = skeleton.map(std::sync::Arc::new);
     anyhow::ensure!(!out.positions.is_empty(), "{path}: no skinned mesh found");
     crate::room::recompute_bbox(&mut out);
     Ok(out)

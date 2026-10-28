@@ -22,6 +22,11 @@ pub struct Mesh {
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
+    /// Bone indices and weights per vertex (empty for static meshes).
+    pub joints: Vec<[u8; 4]>,
+    pub weights: Vec<[u8; 4]>,
+    /// Skeleton the joints refer to (characters only).
+    pub rig: Option<std::sync::Arc<crate::skeleton::Skeleton>>,
     pub shapes: Vec<Shape>,
     pub bbox: [f32; 6],
 }
@@ -92,6 +97,7 @@ pub(crate) fn dolm(c: &mut Cur) -> Result<Mesh> {
         };
 
         let (mut pos, mut nor, mut uv) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut jn, mut wt) = (Vec::new(), Vec::new());
         for _ in 0..verts {
             pos.push([c.f32()?, c.f32()?, c.f32()?]);
             let n = c.take(4)?;
@@ -102,7 +108,9 @@ pub(crate) fn dolm(c: &mut Cur) -> Result<Mesh> {
                 t = [f16(c.u16()?), f16(c.u16()?)];
             }
             if fmt >> 2 & 1 == 1 {
-                c.take(8)?; // bone indices + weights
+                let b = c.take(8)?; // bone indices + weights
+                jn.push([b[0], b[1], b[2], b[3]]);
+                wt.push([b[4], b[5], b[6], b[7]]);
             }
             if fmt >> 1 & 1 == 1 {
                 c.take(4)?;
@@ -119,6 +127,8 @@ pub(crate) fn dolm(c: &mut Cur) -> Result<Mesh> {
             out.positions = pos;
             out.normals = nor;
             out.uvs = uv;
+            out.joints = jn;
+            out.weights = wt;
             out.indices = indices;
             out.shapes = ranges
                 .into_iter()
@@ -205,12 +215,15 @@ fn parse_smd_v1_2(c: &mut Cur, version: u8) -> Result<Mesh> {
     let indices = read_indices(c, verts, tris)?;
 
     let (mut positions, mut normals, mut uvs) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut joints, mut weights) = (Vec::new(), Vec::new());
     for _ in 0..verts {
         positions.push([c.f32()?, c.f32()?, c.f32()?]);
         normals.push(normal(c.take(4)?));
         c.take(4)?; // tangent
         uvs.push([f16(c.u16()?), f16(c.u16()?)]);
-        c.take(8)?; // bone indices + weights
+        let b = c.take(8)?; // bone indices + weights
+        joints.push([b[0], b[1], b[2], b[3]]);
+        weights.push([b[4], b[5], b[6], b[7]]);
         if fmt >> 1 & 1 == 1 {
             c.take(4)?;
         }
@@ -223,7 +236,7 @@ fn parse_smd_v1_2(c: &mut Cur, version: u8) -> Result<Mesh> {
     for (s, n) in shapes_out.iter_mut().zip(names) {
         s.name = n;
     }
-    Ok(Mesh { positions, normals, uvs, indices, shapes: shapes_out, bbox })
+    Ok(Mesh { positions, normals, uvs, indices, joints, weights, shapes: shapes_out, bbox, rig: None })
 }
 
 pub fn parse_smd(data: &[u8]) -> Result<Mesh> {
@@ -270,7 +283,7 @@ pub fn parse_fmt(data: &[u8]) -> Result<Mesh> {
             }
         }
         let starts: Vec<u32> = refs.iter().map(|r| r.2).collect();
-        mesh = Mesh { positions, normals, uvs, indices, shapes: shapes_from_starts(&starts, tris), bbox };
+        mesh = Mesh { positions, normals, uvs, indices, joints: Vec::new(), weights: Vec::new(), rig: None, shapes: shapes_from_starts(&starts, tris), bbox };
         shape_refs = refs;
     } else {
         mesh = dolm(&mut c)?;
