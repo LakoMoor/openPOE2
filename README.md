@@ -11,6 +11,7 @@ only ever read. The project never connects to official servers and does not touc
 
 - `Bundles2` reader: Oodle (Leviathan) decompression via the pure-Rust `oozextract`, index with ~4.27 M files.
 - `.datc64` table reader with schema validation. 549 of 568 tables with a community schema decode fully.
+- `dds2png` / `icongrid`: texture decoding (BC-compressed DDS) and icon sheets built from table columns.
 - Server-side behaviour is not stored in the client, so gameplay will be a reconstruction, not an exact copy.
 
 ## Usage

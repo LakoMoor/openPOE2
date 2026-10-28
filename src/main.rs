@@ -22,6 +22,18 @@ fn main() -> Result<()> {
         t.elapsed().as_secs_f32()
     );
 
+    if filter.as_deref() == Some("--list-all") {
+        let mut v: Vec<_> = idx.paths.iter().collect();
+        v.sort_by(|a, b| a.0.cmp(b.0));
+        let mut s = String::new();
+        for (p, r) in v {
+            s.push_str(&format!("{}	{}
+", p, r.size));
+        }
+        std::fs::write(out_path.context("--list-all <out file>")?, s)?;
+        return Ok(());
+    }
+
     if filter.as_deref() == Some("--extract-prefix") {
         let prefix = out_path.context("--extract-prefix <prefix> <out dir> [ext]")?;
         let out_dir = PathBuf::from(std::env::args().nth(4).context("missing out dir")?);
