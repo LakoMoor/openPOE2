@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use image::{Rgba, RgbaImage};
 use poe2_bundles::index::Index;
-use poe2_bundles::mesh;
+use poe2_bundles::{material, mesh};
+use image_dds::ddsfile::Dds;
+use std::io::Cursor;
 
 const SIZE: u32 = 900;
 
@@ -29,6 +31,32 @@ fn main() -> Result<()> {
     );
     for s in &m.shapes {
         println!("  shape {:?} material {:?} ({} indices)", s.name, s.material, s.index_count);
+    }
+
+    // Load one base-colour texture per shape (None = untextured).
+    struct Tex {
+        img: RgbaImage,
+        alpha_test: bool,
+    }
+    let load_tex = |mat: &str| -> Option<Tex> {
+        if mat.is_empty() {
+            return None;
+        }
+        let m = material::parse(&idx.read_file(&dir, mat).ok()?).ok()?;
+        let dds = Dds::read(&mut Cursor::new(idx.read_file(&dir, &m.albedo?).ok()?)).ok()?;
+        let img = image_dds::image_from_dds(&dds, 0).ok()?;
+        Some(Tex { img, alpha_test: !m.opaque })
+    };
+    let textures: Vec<Option<Tex>> = m.shapes.iter().map(|s| load_tex(&s.material)).collect();
+    println!("textured shapes: {}/{}", textures.iter().flatten().count(), textures.len());
+    // Shape owning each triangle.
+    let mut tri_shape = vec![usize::MAX; m.indices.len() / 3];
+    for (si, sh) in m.shapes.iter().enumerate() {
+        let a = (sh.first_index / 3) as usize;
+        let b = a + (sh.index_count / 3) as usize;
+        for t in a..b.min(tri_shape.len()) {
+            tri_shape[t] = si;
+        }
     }
 
     // Camera: rotate around the vertical axis, slight downward pitch.
@@ -76,7 +104,8 @@ fn main() -> Result<()> {
         [l[0] / n, l[1] / n, l[2] / n]
     };
 
-    for t in m.indices.chunks_exact(3) {
+    for (ti, t) in m.indices.chunks_exact(3).enumerate() {
+        let tex = textures.get(tri_shape[ti]).and_then(|t| t.as_ref());
         let (i0, i1, i2) = (t[0] as usize, t[1] as usize, t[2] as usize);
         let (Some(&p0), Some(&p1), Some(&p2)) = (pts.get(i0), pts.get(i1), pts.get(i2)) else { continue };
         let (s0, s1, s2) = (proj(p0), proj(p1), proj(p2));
@@ -102,6 +131,25 @@ fn main() -> Result<()> {
                 if z >= zbuf[zi] {
                     continue;
                 }
+                // Base colour: texture sample if available, else flat tan.
+                let mut base = [0.89f32, 0.74, 0.59];
+                if let Some(tx) = tex {
+                    let (mut u, mut v) = (0.0f32, 0.0f32);
+                    for (w, i) in [(w0, i0), (w1, i1), (w2, i2)] {
+                        if let Some(uv) = m.uvs.get(i) {
+                            u += w * uv[0];
+                            v += w * uv[1];
+                        }
+                    }
+                    let (tw, th) = (tx.img.width(), tx.img.height());
+                    let tx_x = (u.rem_euclid(1.0) * tw as f32) as u32 % tw;
+                    let tx_y = (v.rem_euclid(1.0) * th as f32) as u32 % th;
+                    let px = tx.img.get_pixel(tx_x, tx_y).0;
+                    if tx.alpha_test && px[3] < 128 {
+                        continue;
+                    }
+                    base = [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0];
+                }
                 zbuf[zi] = z;
                 let mut n = [0.0f32; 3];
                 for (w, i) in [(w0, i0), (w1, i1), (w2, i2)] {
@@ -114,7 +162,7 @@ fn main() -> Result<()> {
                 let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
                 let lam = ((n[0] * light[0] + n[1] * light[1] + n[2] * light[2]) / len).abs();
                 let v = 0.18 + 0.82 * lam;
-                img.put_pixel(x, y, Rgba([(228.0 * v) as u8, (190.0 * v) as u8, (150.0 * v) as u8, 255]));
+                img.put_pixel(x, y, Rgba([(255.0 * base[0] * v) as u8, (255.0 * base[1] * v) as u8, (255.0 * base[2] * v) as u8, 255]));
             }
         }
     }
