@@ -173,3 +173,39 @@ pub fn template_value(idx: &Index, dir: &Path, key: &str) -> Option<i64> {
         (k.trim() == key).then(|| v.trim().parse().ok()).flatten()
     })
 }
+
+/// A weapon base type with its `WeaponTypes` numbers.
+#[derive(Debug, Clone)]
+pub struct Weapon {
+    pub name: String,
+    pub min_damage: i64,
+    pub max_damage: i64,
+    /// Milliseconds per attack.
+    pub attack_ms: i64,
+}
+
+/// Weapon base types that can drop at `max_drop_level` or below, ordered by drop level then name.
+pub fn weapons(idx: &Index, dir: &Path, schema_dir: &Path, max_drop_level: i64) -> Result<Vec<Weapon>> {
+    let schema = Schema::load(schema_dir)?;
+    let wt_bytes = idx.read_file(dir, "data/balance/weapontypes.datc64")?;
+    let wt = Table::parse(&wt_bytes)?;
+    let it_bytes = idx.read_file(dir, "data/balance/baseitemtypes.datc64")?;
+    let it = Table::parse(&it_bytes)?;
+    let wts = schema.table("weapontypes").context("no schema for weapontypes")?;
+    let its = schema.table("baseitemtypes").context("no schema for baseitemtypes")?;
+    let mut out: Vec<(i64, Weapon)> = Vec::new();
+    for i in 0..wt.rows {
+        let row = wt.decode_row(wts, i)?;
+        let get = |n: &str| row.iter().find_map(|(k, v)| match v { Value::Int(x) if k == n => Some(*x), _ => None }).unwrap_or(0);
+        let Some(Value::Ref(Some(item))) = row.iter().find(|(k, _)| k == "BaseItemType").map(|(_, v)| v.clone()) else { continue };
+        let item = it.decode_row(its, item as usize)?;
+        let level = item.iter().find_map(|(k, v)| match v { Value::Int(x) if k == "DropLevel" => Some(*x), _ => None }).unwrap_or(0);
+        let name = item.iter().find_map(|(k, v)| match v { Value::Str(s) if k == "Name" => Some(s.clone()), _ => None }).unwrap_or_default();
+        if name.is_empty() || level > max_drop_level || get("DamageMax") == 0 || get("Speed") == 0 {
+            continue;
+        }
+        out.push((level, Weapon { name, min_damage: get("DamageMin"), max_damage: get("DamageMax"), attack_ms: get("Speed") }));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(&b.1.name)));
+    Ok(out.into_iter().map(|(_, w)| w).collect())
+}

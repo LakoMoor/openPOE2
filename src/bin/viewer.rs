@@ -675,6 +675,9 @@ fn screenshot_world(
         play.attack = Some(0.0);
     }
     play.roll_wanted = std::env::var_os("POE2_ROLL").is_some();
+    if let Some(n) = std::env::var("POE2_SWAP").ok().and_then(|v| v.parse::<usize>().ok()) {
+        (0..n).for_each(|_| play.next_weapon());
+    }
     let steps = (seconds * 60.0).max(1.0) as u32;
     for i in 0..steps {
         play.step(1.0 / 60.0, &mut cam, i as f32 / 60.0, &mut renderer);
@@ -816,6 +819,9 @@ struct Play {
     roll_secs: f32,
     /// Set by the roll key; consumed on the next step.
     roll_wanted: bool,
+    /// Weapons Tab cycles through, and the one in hand.
+    weapons: Vec<poe2_bundles::monster::Weapon>,
+    weapon_ix: usize,
     /// Seconds until the monster can strike again.
     enemy_cooldown: f32,
     /// Text for the window title.
@@ -856,6 +862,19 @@ const CHAR_RADIUS: f32 = 25.0;
 const ROLL_DISTANCE: f32 = 450.0;
 
 impl Play {
+    /// Take the next weapon from the list: damage range and swing speed follow its `WeaponTypes` row.
+    fn next_weapon(&mut self) {
+        if self.weapons.is_empty() {
+            return;
+        }
+        self.weapon_ix = (self.weapon_ix + 1) % self.weapons.len();
+        let w = &self.weapons[self.weapon_ix];
+        self.hit_range = (w.min_damage as i32, w.max_damage.max(w.min_damage) as i32);
+        self.swing_secs = Some(w.attack_ms as f32 / 1000.0);
+        self.status = format!("{}: {}-{} damage, {} ms", w.name, w.min_damage, w.max_damage, w.attack_ms);
+        eprintln!("weapon: {}", self.status);
+    }
+
     fn step(&mut self, dt: f32, cam: &mut Camera, clock: f32, renderer: &mut Renderer) {
         let [w, a, s, d] = self.keys;
         // Attacks root the character until the clip ends.
@@ -1129,7 +1148,7 @@ fn show_play(
         ["idle_unarmed_01", "run_unarmed_01", "attack_hollowpalm_01a"].iter().filter_map(|n| load_clip(idx, dir, &format!("{set}:{n}"))).chain(load_clip(idx, dir, "basedodgeroll:dodge_claw_unarmed_01")).collect();
     renderer.set_animation(&char_mesh, clips, base, center);
     if let Some(w) = window {
-        w.set_title(&format!("openPOE2 - {character} in {world} (WASD move, Space attack, Shift roll, wheel zoom)"));
+        w.set_title(&format!("openPOE2 - {character} in {world} (WASD move, Space attack, Shift roll, Tab weapon, wheel zoom)"));
     }
     // Starting life and unarmed damage of the class come from the Characters table.
     let pstats = std::env::var_os("POE2_SCHEMA")
@@ -1138,7 +1157,10 @@ fn show_play(
             eprintln!("player: life {} damage {}-{} swing {} ms roll {} ms weapon {:?}", p.life, p.min_damage, p.max_damage, p.attack_ms, p.roll_ms, p.weapon);
             (p.life as i32, (p.min_damage as i32, p.max_damage.max(p.min_damage) as i32), (p.attack_ms > 0).then(|| p.attack_ms as f32 / 1000.0), if p.roll_ms > 0 { p.roll_ms as f32 / 1000.0 } else { 0.75 })
         });
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, enemy_cooldown: 0.0, status: String::new() })
+    let weapons = std::env::var_os("POE2_SCHEMA")
+        .and_then(|sd| poe2_bundles::monster::weapons(idx, dir, std::path::Path::new(&sd), 1).ok())
+        .unwrap_or_default();
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, weapons, weapon_ix: 0, enemy_cooldown: 0.0, status: String::new() })
 }
 
 impl ApplicationHandler for App {
@@ -1211,6 +1233,13 @@ impl ApplicationHandler for App {
             {
                 if let Some(p) = self.play.as_mut() {
                     p.roll_wanted = true;
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if self.play.is_some() && event.state == ElementState::Pressed && event.physical_key == PhysicalKey::Code(KeyCode::Tab) =>
+            {
+                if let Some(p) = self.play.as_mut() {
+                    p.next_weapon();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => match event.logical_key {
