@@ -14,6 +14,8 @@ Offline Rust reimplementation of Path of Exile 2 that reads the user's own insta
 
 - Item 4 progress: the player template `metadata/characters/character.ot` holds `life_per_level = 12`, `mana_per_level = 4`, base evasion 7; player life = `Characters.BaseMaxLife` + 12 x level (28 at level 1; `POE2_LEVEL`). Attribute-to-life ratios are still not found.
 
+- Item 5 progress: `--world <zone>.tgr` works in play mode (crude preview: room nodes as flat ground, no gaps filled, no real generator); the player starts on the geometry nearest the zone centre (edge of a room in `intro_1.tgr`). Nothing keeps the player inside the rooms.
+
 ## Next, in order
 1. Camera constants from the client (Ghidra), replacing the estimates.
 2. `.tdt` grids: meaning of the 23x23 node grid and the tile-wide grid; connect heights and walkability to play mode.

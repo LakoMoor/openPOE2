@@ -1145,7 +1145,16 @@ fn show_play(
         poe2_bundles::room::recompute_bbox(&mut char_mesh);
     }
     let wb = world_mesh.bbox;
-    let start = glam::Vec2::new((wb[0] + wb[1]) / 2.0, (wb[2] + wb[3]) / 2.0);
+    let mut start = glam::Vec2::new((wb[0] + wb[1]) / 2.0, (wb[2] + wb[3]) / 2.0);
+    // A zone graph has gaps between rooms: start on the geometry nearest to the centre.
+    if world.ends_with(".tgr") {
+        if let Some(p) = world_mesh.positions.iter().min_by(|a, b| {
+            let d = |p: &[f32; 3]| (p[0] - start.x).powi(2) + (p[1] - start.y).powi(2);
+            d(a).total_cmp(&d(b))
+        }) {
+            start = glam::Vec2::new(p[0], p[1]);
+        }
+    }
     let base = world_mesh.positions.len();
 
     let obstacles = world_mesh.obstacles.clone();
