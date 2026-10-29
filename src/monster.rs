@@ -185,6 +185,8 @@ pub struct Weapon {
     pub max_damage: i64,
     /// Milliseconds per attack.
     pub attack_ms: i64,
+    /// Held model (`ItemVisualIdentity.AOFile2`), lower case.
+    pub model: Option<String>,
 }
 
 /// Weapon base types that can drop at `max_drop_level` or below, ordered by drop level then name.
@@ -201,13 +203,15 @@ pub fn weapons(idx: &Index, dir: &Path, schema_dir: &Path, max_drop_level: i64) 
         let row = wt.decode_row(wts, i)?;
         let get = |n: &str| row.iter().find_map(|(k, v)| match v { Value::Int(x) if k == n => Some(*x), _ => None }).unwrap_or(0);
         let Some(Value::Ref(Some(item))) = row.iter().find(|(k, _)| k == "BaseItemType").map(|(_, v)| v.clone()) else { continue };
-        let item = it.decode_row(its, item as usize)?;
+        let item_row = item as usize;
+        let item = it.decode_row(its, item_row)?;
         let level = item.iter().find_map(|(k, v)| match v { Value::Int(x) if k == "DropLevel" => Some(*x), _ => None }).unwrap_or(0);
         let name = item.iter().find_map(|(k, v)| match v { Value::Str(s) if k == "Name" => Some(s.clone()), _ => None }).unwrap_or_default();
         if name.is_empty() || level > max_drop_level || get("DamageMax") == 0 || get("Speed") == 0 {
             continue;
         }
-        out.push((level, Weapon { name, min_damage: get("DamageMin"), max_damage: get("DamageMax"), attack_ms: get("Speed") }));
+        let model = held_model(idx, dir, &schema, item_row);
+        out.push((level, Weapon { name, min_damage: get("DamageMin"), max_damage: get("DamageMax"), attack_ms: get("Speed"), model }));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(&b.1.name)));
     Ok(out.into_iter().map(|(_, w)| w).collect())

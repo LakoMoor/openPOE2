@@ -109,6 +109,8 @@ struct Anim {
     joints: Vec<[u8; 4]>,
     weights: Vec<[u8; 4]>,
     center: [f32; 3],
+    /// Vertex ranges (in the character mesh) that are collapsed to nothing, e.g. weapons not in hand.
+    hidden: Vec<std::ops::Range<usize>>,
 }
 
 struct Renderer {
@@ -357,6 +359,7 @@ impl Renderer {
             joints: mesh.joints.clone(),
             weights: mesh.weights.clone(),
             center,
+            hidden: Vec::new(),
         });
     }
 
@@ -370,6 +373,9 @@ impl Renderer {
         let to_view = |v: Vec3| [v.x, -v.z, v.y];
         let vertices: Vec<Vertex> = (0..a.rest_pos.len())
             .map(|i| {
+                if a.hidden.iter().any(|r| r.contains(&i)) {
+                    return Vertex { pos: [0.0; 3], normal: [0.0, 1.0, 0.0], uv: [0.0; 2] };
+                }
                 let mut m = Mat4::ZERO;
                 for k in 0..4 {
                     let w = a.weights[i][k] as f32 / 255.0;
@@ -830,7 +836,11 @@ struct Play {
     kills: usize,
     /// Weapons Tab cycles through, and the one in hand.
     weapons: Vec<poe2_bundles::monster::Weapon>,
+    /// 0 is the class start weapon, 1.. index `weapons`.
     weapon_ix: usize,
+    held_ranges: Vec<Option<std::ops::Range<usize>>>,
+    start_hit: (i32, i32),
+    start_swing: Option<f32>,
     /// Seconds until the monster can strike again.
     enemy_cooldown: f32,
     /// Text for the window title.
@@ -881,11 +891,17 @@ impl Play {
         if self.weapons.is_empty() {
             return;
         }
-        self.weapon_ix = (self.weapon_ix + 1) % self.weapons.len();
-        let w = &self.weapons[self.weapon_ix];
-        self.hit_range = (w.min_damage as i32, w.max_damage.max(w.min_damage) as i32);
-        self.swing_secs = Some(w.attack_ms as f32 / 1000.0);
-        self.status = format!("{}: {}-{} damage, {} ms", w.name, w.min_damage, w.max_damage, w.attack_ms);
+        self.weapon_ix = (self.weapon_ix + 1) % (self.weapons.len() + 1);
+        if self.weapon_ix == 0 {
+            self.hit_range = self.start_hit;
+            self.swing_secs = self.start_swing;
+            self.status = "start weapon".into();
+        } else {
+            let w = &self.weapons[self.weapon_ix - 1];
+            self.hit_range = (w.min_damage as i32, w.max_damage.max(w.min_damage) as i32);
+            self.swing_secs = Some(w.attack_ms as f32 / 1000.0);
+            self.status = format!("{}: {}-{} damage, {} ms", w.name, w.min_damage, w.max_damage, w.attack_ms);
+        }
         eprintln!("weapon: {}", self.status);
     }
 
@@ -970,6 +986,7 @@ impl Play {
             self.heading += diff;
         }
         if let Some(anim) = renderer.anim.as_mut() {
+            anim.hidden = self.held_ranges.iter().enumerate().filter(|(i, _)| *i != self.weapon_ix).filter_map(|(_, r)| r.clone()).collect();
             let want = if self.roll.is_some() && anim.clips.len() > 3 { 3 } else if self.attack.is_some() { 2 } else { self.running as usize };
             if anim.current != want && want < anim.clips.len() {
                 anim.current = want;
@@ -1071,43 +1088,61 @@ fn show_play(
     };
     let (world_mesh, mut textures) = load(world)?;
     let (mut char_mesh, mut char_tex) = load(character)?;
-    // Weapon: a sword model skinned rigidly to the right wrist (grip placement is a guess).
-    // The class's starting weapon (when a dat schema is given); otherwise a broadsword.
+    // Weapons: models skinned rigidly to the right wrist (grip placement is a guess). Index 0 is the class
+    // start weapon, the others follow `weapons` (Tab cycles); only the one in hand is drawn.
+    let weapons = std::env::var_os("POE2_SCHEMA")
+        .and_then(|sd| poe2_bundles::monster::weapons(idx, dir, std::path::Path::new(&sd), 1).ok())
+        .unwrap_or_default();
     let held = std::env::var_os("POE2_SCHEMA")
         .and_then(|sd| poe2_bundles::monster::player_stats(idx, dir, std::path::Path::new(&sd), character).ok())
         .and_then(|p| p.weapon_model);
-    let weapon_path = std::env::var("POE2_WEAPON")
+    let start_path = std::env::var("POE2_WEAPON")
         .ok()
         .or(held)
         .unwrap_or_else(|| "art/models/items/weapons/onehandweapons/onehandswords/basetypes/broadsword.fmt".into());
-    if weapon_path != "none" {
-        if let (Some(rig), Some((w, wtex))) = (char_mesh.rig.clone(), load(&weapon_path)) {
-            if let Some(bone) = rig.index_of("R_wrist_jntBnd") {
-                let b = w.bbox;
-                // Grip near the pommel end (largest z, since up is -z), centred on the blade axis.
-                let grip = Vec3::new((b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0, b[5] - (b[5] - b[4]) * 0.15);
-                let rest = rig.world(bone);
-                let wrist = rest.transform_point3(Vec3::ZERO);
-                let spin: f32 = std::env::var("POE2_WEAPON_SPIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-                let rot = Mat4::from_rotation_z(spin.to_radians()) * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-                let xf = Mat4::from_translation(wrist) * rot * Mat4::from_translation(-grip);
-                let base = char_mesh.positions.len() as u32;
-                char_mesh.positions.extend(w.positions.iter().map(|p| xf.transform_point3(Vec3::from(*p)).to_array()));
-                char_mesh.normals.extend(w.normals.iter().map(|n| (rot.transform_vector3(Vec3::from(*n))).to_array()));
-                char_mesh.uvs.extend_from_slice(&w.uvs);
-                char_mesh.joints.extend(w.positions.iter().map(|_| [bone as u8, 0, 0, 0]));
-                char_mesh.weights.extend(w.positions.iter().map(|_| [255, 0, 0, 0]));
-                let first = char_mesh.indices.len() as u32;
-                char_mesh.indices.extend(w.indices.iter().map(|i| i + base));
-                char_mesh.shapes.extend(w.shapes.iter().map(|sh| {
-                    let mut sh = sh.clone();
-                    sh.first_index += first;
-                    sh
-                }));
-                char_tex.extend(wtex);
-                poe2_bundles::room::recompute_bbox(&mut char_mesh);
+    let mut held_ranges: Vec<Option<std::ops::Range<usize>>> = Vec::new();
+    if start_path != "none" {
+        let mut paths = vec![Some(start_path)];
+        paths.extend(weapons.iter().take(8).map(|w| w.model.clone()));
+        let mut loaded: std::collections::HashMap<String, Option<std::ops::Range<usize>>> = std::collections::HashMap::new();
+        for path in paths {
+            let Some(path) = path else { held_ranges.push(None); continue };
+            if let Some(r) = loaded.get(&path) {
+                held_ranges.push(r.clone());
+                continue;
             }
+            let mut range = None;
+            if let (Some(rig), Some((w, wtex))) = (char_mesh.rig.clone(), load(&path)) {
+                if let Some(bone) = rig.index_of("R_wrist_jntBnd") {
+                    let b = w.bbox;
+                    // Grip near the pommel end (largest z, since up is -z), centred on the blade axis.
+                    let grip = Vec3::new((b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0, b[5] - (b[5] - b[4]) * 0.15);
+                    let rest = rig.world(bone);
+                    let wrist = rest.transform_point3(Vec3::ZERO);
+                    let spin: f32 = std::env::var("POE2_WEAPON_SPIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                    let rot = Mat4::from_rotation_z(spin.to_radians()) * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+                    let xf = Mat4::from_translation(wrist) * rot * Mat4::from_translation(-grip);
+                    let base = char_mesh.positions.len() as u32;
+                    char_mesh.positions.extend(w.positions.iter().map(|p| xf.transform_point3(Vec3::from(*p)).to_array()));
+                    char_mesh.normals.extend(w.normals.iter().map(|n| (rot.transform_vector3(Vec3::from(*n))).to_array()));
+                    char_mesh.uvs.extend_from_slice(&w.uvs);
+                    char_mesh.joints.extend(w.positions.iter().map(|_| [bone as u8, 0, 0, 0]));
+                    char_mesh.weights.extend(w.positions.iter().map(|_| [255, 0, 0, 0]));
+                    let first = char_mesh.indices.len() as u32;
+                    char_mesh.indices.extend(w.indices.iter().map(|i| i + base));
+                    char_mesh.shapes.extend(w.shapes.iter().map(|sh| {
+                        let mut sh = sh.clone();
+                        sh.first_index += first;
+                        sh
+                    }));
+                    char_tex.extend(wtex);
+                    range = Some(base as usize..char_mesh.positions.len());
+                }
+            }
+            loaded.insert(path, range.clone());
+            held_ranges.push(range);
         }
+        poe2_bundles::room::recompute_bbox(&mut char_mesh);
     }
     let wb = world_mesh.bbox;
     let start = glam::Vec2::new((wb[0] + wb[1]) / 2.0, (wb[2] + wb[3]) / 2.0);
@@ -1194,9 +1229,6 @@ fn show_play(
             eprintln!("player: life {} damage {}-{} swing {} ms roll {} ms weapon {:?}", p.life, p.min_damage, p.max_damage, p.attack_ms, p.roll_ms, p.weapon);
             (p.life as i32, (p.min_damage as i32, p.max_damage.max(p.min_damage) as i32), (p.attack_ms > 0).then(|| p.attack_ms as f32 / 1000.0), if p.roll_ms > 0 { p.roll_ms as f32 / 1000.0 } else { 0.75 })
         });
-    let weapons = std::env::var_os("POE2_SCHEMA")
-        .and_then(|sd| poe2_bundles::monster::weapons(idx, dir, std::path::Path::new(&sd), 1).ok())
-        .unwrap_or_default();
     // Affixes from the Mods table, e.g. POE2_MODS=IncreasedLife1: the stats the engine knows are applied.
     let mut pstats = pstats;
     let mut run_mult = 1.0f32;
@@ -1228,7 +1260,7 @@ fn show_play(
     let level_table: Vec<(i64, f64)> = std::env::var_os("POE2_SCHEMA")
         .map(|sd| (1..=20).filter_map(|l| poe2_bundles::monster::level_stats(idx, dir, std::path::Path::new(&sd), l).ok()).collect())
         .unwrap_or_default();
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, weapons, weapon_ix: 0, enemy_cooldown: 0.0, status: String::new() })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, weapons, weapon_ix: 0, held_ranges, start_hit: pstats.1, start_swing: pstats.2, enemy_cooldown: 0.0, status: String::new() })
 }
 
 impl ApplicationHandler for App {
