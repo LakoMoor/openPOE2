@@ -802,6 +802,7 @@ struct Enemy {
     heading: f32,
     hp: i32,
     max_hp: i32,
+    damage: i32,
     name: String,
     /// Idle, run, attack and death clips of the monster's own rig (empty when it has none).
     clips: Vec<Clip>,
@@ -918,7 +919,7 @@ impl Play {
                 self.enemy_cooldown = (self.enemy_cooldown - dt).max(0.0);
                 if dist <= STRIKE_RANGE && self.enemy_cooldown == 0.0 {
                     self.enemy_cooldown = ENEMY_STRIKE_INTERVAL;
-                    self.player_hp = (self.player_hp - ENEMY_DAMAGE).max(0);
+                    self.player_hp = (self.player_hp - e.damage).max(0);
                     eprintln!("strike: player hp {}", self.player_hp);
                     self.status = if self.player_hp > 0 { format!("you: {}/{PLAYER_HP} hp", self.player_hp) } else { "you died".into() };
                 }
@@ -1043,7 +1044,13 @@ fn show_play(
         textures.extend(tex);
         // Name and life scale come from MonsterVarieties when a dat schema is available.
         let stats = std::env::var_os("POE2_SCHEMA").and_then(|sd| poe2_bundles::monster::find(idx, dir, std::path::Path::new(&sd), &monster_path).ok());
-        let (name, max_hp) = stats.map_or_else(|| ("training monster".to_string(), ENEMY_HP), |st| (st.name, (ENEMY_HP as i64 * st.life_multiplier / 100) as i32));
+        let level = std::env::var("POE2_MON_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(1usize);
+        let lvl_stats = std::env::var_os("POE2_SCHEMA").and_then(|sd| poe2_bundles::monster::level_stats(idx, dir, std::path::Path::new(&sd), level).ok());
+        let (name, max_hp, damage) = match (stats, lvl_stats) {
+            (Some(st), Some((life, dmg))) => (st.name, ((life * st.life_multiplier / 100).max(1)) as i32, (dmg * st.damage_multiplier as f64 / 100.0).round().max(1.0) as i32),
+            (Some(st), None) => (st.name, (ENEMY_HP as i64 * st.life_multiplier / 100) as i32, ENEMY_DAMAGE),
+            _ => ("training monster".to_string(), ENEMY_HP, ENEMY_DAMAGE),
+        };
         // The monster's own animation file sits beside its art: .../monsters/<family>/<name>/rig.ast.
         let rig = monster_path
             .strip_prefix("metadata/monsters/")
@@ -1062,7 +1069,7 @@ fn show_play(
             eprintln!("monster clips (idle, run, attack, death): {:?}", list.iter().map(|c| c.is_some()).collect::<Vec<_>>());
             list.into_iter().map(|c| c.unwrap_or(Clip { tracks: Vec::new(), fps: 30.0, length: 1.0 })).collect::<Vec<_>>()
         }).unwrap_or_default();
-        Enemy { mesh: m, base, name, max_hp, clips, rig, state: 0, state_time: 0.0, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), heading: 0.0, hp: max_hp }
+        Enemy { mesh: m, base, name, max_hp, damage, clips, rig, state: 0, state_time: 0.0, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), heading: 0.0, hp: max_hp }
     });
     poe2_bundles::room::recompute_bbox(&mut all);
     let center = mesh_center(&all);

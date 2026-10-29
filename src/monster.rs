@@ -62,3 +62,15 @@ pub fn find(idx: &Index, dir: &Path, schema_dir: &Path, ao_path: &str) -> Result
     }
     anyhow::bail!("no monster variety for {ao_path}")
 }
+
+/// Base life and damage of a monster of `level` from `DefaultMonsterStats` (row 0 is level 1).
+pub fn level_stats(idx: &Index, dir: &Path, schema_dir: &Path, level: usize) -> Result<(i64, f64)> {
+    let schema = Schema::load(schema_dir)?;
+    let bytes = idx.read_file(dir, "data/balance/defaultmonsterstats.datc64")?;
+    let table = Table::parse(&bytes)?;
+    let ts = schema.table("defaultmonsterstats").context("no schema for defaultmonsterstats")?;
+    let row = table.decode_row(ts, level.saturating_sub(1).min(table.rows.saturating_sub(1)))?;
+    let life = row.iter().find_map(|(k, v)| match (k.as_str(), v) { ("MonsterLife", Value::Int(i)) => Some(*i), _ => None }).unwrap_or(0);
+    let dmg = row.iter().find_map(|(k, v)| match (k.as_str(), v) { ("Damage", Value::Float(f)) => Some(*f as f64), _ => None }).unwrap_or(0.0);
+    Ok((life, dmg))
+}
