@@ -15,6 +15,12 @@ Rendered offscreen by `viewer` from a local install (game art belongs to Grindin
 |---|---|
 | ![character](site/shots/character.png) | ![encampment](site/shots/encampment.png) |
 
+| Sandbox combat (animated monster from the game files) | Sword on the character |
+|---|---|
+| ![combat](site/shots/combat.png) | ![weapon](site/shots/weapon.png) |
+
+Play mode (`viewer <Bundles2> metadata/characters/str/strfourb.ao --world <room.arm>`): WASD to run, Space to attack, simple collision with tall room objects, a training monster that chases and strikes. Combat numbers (damage, health, speeds) are invented placeholders; only the monster's name, life scale and attack interval come from the game tables (`POE2_SCHEMA=<dat-schema dir>`). Rooms use real terrain tiles matched by size and edge types (edge order N, E, S, W); `POE2_NO_TILES=1` falls back to flat ground. Known gaps: `.tdt` grids (heights, walkability) are parsed but not interpreted, zone generation is only a rough `.tgr` preview, no skills or items.
+
 ## What works
 
 - `Bundles2` reader: Oodle (Leviathan) decompression via the pure-Rust `oozextract`, index with ~4.27 M files.
