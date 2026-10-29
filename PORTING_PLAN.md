@@ -12,6 +12,8 @@ Offline Rust reimplementation of Path of Exile 2 that reads the user's own insta
 - Item 1 blocked on Ghidra: no camera constants in data files or client strings.
 - Item 4 findings: `Stats` decodes; `Mods` is now readable (all 16784 rows): every `StatNValue` is a (min, max) interval in this build and `Stat8Min/MaxHardmode` are gone; fixed in `schema_overrides.txt`. `GameConstants` and `ExperienceLevels` have no community schema; `GameConstants` is 16-byte rows (name, value, divisor) and holds ailment, stun and monster-defence constants but no attribute-to-life ratios.
 
+- Item 4 progress: the player template `metadata/characters/character.ot` holds `life_per_level = 12`, `mana_per_level = 4`, base evasion 7; player life = `Characters.BaseMaxLife` + 12 x level (28 at level 1; `POE2_LEVEL`). Attribute-to-life ratios are still not found.
+
 ## Next, in order
 1. Camera constants from the client (Ghidra), replacing the estimates.
 2. `.tdt` grids: meaning of the 23x23 node grid and the tile-wide grid; connect heights and walkability to play mode.

@@ -145,6 +145,9 @@ pub fn player_stats(idx: &Index, dir: &Path, schema_dir: &Path, ao_path: &str) -
             }
         }
     }
+    // Life grows by `life_per_level` for every level (16 + 12 = 28 at level 1).
+    let level = std::env::var("POE2_LEVEL").ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(1).max(1);
+    stats.life += template_value(idx, dir, "life_per_level").unwrap_or(0) * level;
     Ok(stats)
 }
 
@@ -155,4 +158,18 @@ pub fn item_name(idx: &Index, dir: &Path, schema: &Schema, row: usize) -> Option
     let ts = schema.table("baseitemtypes")?;
     let r = table.decode_row(ts, row).ok()?;
     r.iter().find_map(|(k, v)| match v { Value::Str(s) if k == "Name" => Some(s.clone()), _ => None })
+}
+
+/// `key = value` integer from the player template `metadata/characters/character.ot` (UTF-16 or UTF-8 text).
+pub fn template_value(idx: &Index, dir: &Path, key: &str) -> Option<i64> {
+    let b = idx.read_file(dir, "metadata/characters/character.ot").ok()?;
+    let text = if b.starts_with(&[0xff, 0xfe]) {
+        String::from_utf16(&b[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()).ok()?
+    } else {
+        String::from_utf8_lossy(&b).into_owned()
+    };
+    text.lines().find_map(|l| {
+        let (k, v) = l.split_once('=')?;
+        (k.trim() == key).then(|| v.trim().parse().ok()).flatten()
+    })
 }
