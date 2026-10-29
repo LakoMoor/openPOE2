@@ -16,6 +16,8 @@ Offline Rust reimplementation of Path of Exile 2 that reads the user's own insta
 
 - Item 5 progress: `--world <zone>.tgr` works in play mode (crude preview: room nodes as flat ground, no gaps filled, no real generator); the player starts on the geometry nearest the zone centre (edge of a room in `intro_1.tgr`). The player is kept on the zone's ground triangles (slides along edges; `POE2_FREE_ROAM=1` disables). Checked in a 20 s headless run: free roam ends off the ground, constrained ends on it.
 
+- Item 6 check: `data/balance` has no drop-pool / loot-table files (only `DropEffects`, `ChanceableItemClasses`, treasure-hunter and auto-loot-pet tables), so item drop chances are not in the client data: loot rules live on the server.
+
 ## Next, in order
 1. Camera constants from the client (Ghidra), replacing the estimates.
 2. `.tdt` grids: meaning of the 23x23 node grid and the tile-wide grid; connect heights and walkability to play mode.
