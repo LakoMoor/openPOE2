@@ -818,7 +818,7 @@ struct Play {
     obstacles: Vec<[f32; 4]>,
     /// Ground triangles (x, y) of a zone graph: the player cannot leave them. Empty for rooms.
     walkable: Vec<[glam::Vec2; 3]>,
-    enemy: Option<Enemy>,
+    enemies: Vec<Enemy>,
     /// The current swing has already been resolved against the enemy.
     hit_done: bool,
     player_hp: i32,
@@ -847,7 +847,6 @@ struct Play {
     start_hit: (i32, i32),
     start_swing: Option<f32>,
     /// Seconds until the monster can strike again.
-    enemy_cooldown: f32,
     /// Text for the window title.
     status: String,
 }
@@ -870,6 +869,8 @@ struct Enemy {
     home: glam::Vec2,
     /// Seconds since it died.
     dead_time: f32,
+    /// Seconds until it can strike again.
+    cooldown: f32,
     /// MonsterVarieties life and damage multipliers (percent).
     mults: (i64, i64),
 }
@@ -934,17 +935,24 @@ impl Play {
             Some(t) if !self.hit_done && attack_len.is_none_or(|l| t >= l * 0.35) => {
                 self.hit_done = true;
                 let fwd = glam::Vec2::new(self.heading.sin(), -self.heading.cos());
-                if let Some(e) = self.enemy.as_mut().filter(|e| e.hp > 0) {
-                    let to = e.pos - self.pos;
-                    if to.length() < HIT_RANGE && to.normalize_or_zero().dot(fwd) > 0.3 {
+                let pos = self.pos;
+                let any = !self.enemies.is_empty();
+                let target = self
+                    .enemies
+                    .iter_mut()
+                    .filter(|e| e.hp > 0)
+                    .filter(|e| (e.pos - pos).length() < HIT_RANGE && (e.pos - pos).normalize_or_zero().dot(fwd) > 0.3)
+                    .min_by(|a, b| (a.pos - pos).length().total_cmp(&(b.pos - pos).length()));
+                match target {
+                    Some(e) => {
                         let (lo, hi) = self.hit_range;
                         self.swings += 1;
                         e.hp -= lo + ((self.swings * 7) % (hi - lo + 1) as u32) as i32;
                         eprintln!("hit: enemy hp {}", e.hp);
                         self.status = if e.hp > 0 { format!("{} hp {}/{}", e.name, e.hp, e.max_hp) } else { format!("{} slain", e.name) };
-                    } else {
-                        self.status = "missed".into();
                     }
+                    None if any => self.status = "missed".into(),
+                    None => {}
                 }
             }
             None => self.hit_done = false,
@@ -1020,7 +1028,8 @@ impl Play {
         let place = Mat4::from_translation(Vec3::new(self.pos.x, self.pos.y, 0.0)) * Mat4::from_rotation_z(self.heading);
         let _ = clock;
         renderer.animate(self.clip_time, place);
-        if let Some(e) = self.enemy.as_mut() {
+        let mut enemies = std::mem::take(&mut self.enemies);
+        for e in enemies.iter_mut() {
             // Face the player.
             let to = self.pos - e.pos;
             let dist = to.length();
@@ -1047,9 +1056,9 @@ impl Play {
                     e.pos += to / dist * ENEMY_SPEED * dt;
                     moving = true;
                 }
-                self.enemy_cooldown = (self.enemy_cooldown - dt).max(0.0);
-                if dist <= STRIKE_RANGE && self.enemy_cooldown == 0.0 {
-                    self.enemy_cooldown = ENEMY_STRIKE_INTERVAL;
+                e.cooldown = (e.cooldown - dt).max(0.0);
+                if dist <= STRIKE_RANGE && e.cooldown == 0.0 {
+                    e.cooldown = ENEMY_STRIKE_INTERVAL;
                     self.player_hp = (self.player_hp - e.damage).max(0);
                     eprintln!("strike: player hp {}", self.player_hp);
                     self.status = if self.player_hp > 0 { format!("you: {}/{} hp", self.player_hp, self.player_max_hp) } else { "you died".into() };
@@ -1057,7 +1066,7 @@ impl Play {
             }
             let want = if e.hp <= 0 {
                 3
-            } else if self.enemy_cooldown > ENEMY_STRIKE_INTERVAL - 0.8 {
+            } else if e.cooldown > ENEMY_STRIKE_INTERVAL - 0.8 {
                 2
             } else if moving {
                 1
@@ -1076,6 +1085,7 @@ impl Play {
                 _ => renderer.write_static(e.base, &e.mesh, self.center, e.pos, e.heading, e.hp > 0),
             }
         }
+        self.enemies = enemies;
         let c = self.center;
         cam.target = Vec3::new(self.pos.x - c[0], c[2] + 90.0, self.pos.y - c[1]);
     }
@@ -1200,7 +1210,8 @@ fn show_play(
     textures.extend(char_tex);
     // A training monster a few steps from the start.
     let monster_path = std::env::var("POE2_MONSTER").unwrap_or_else(|_| "metadata/monsters/anchorite/anchoriteflathead/anchoriteflathead.ao".into());
-    let enemy = load(&monster_path).map(|(m, tex)| {
+    let pack: usize = std::env::var("POE2_PACK").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let enemies: Vec<Enemy> = (0..pack).filter_map(|n| load(&monster_path).map(|(m, tex)| (n, m, tex))).map(|(n, m, tex)| {
         let base = all.positions.len();
         all.positions.extend_from_slice(&m.positions);
         all.normals.extend_from_slice(&m.normals);
@@ -1242,8 +1253,8 @@ fn show_play(
             list.into_iter().map(|c| c.unwrap_or(Clip { tracks: Vec::new(), fps: 30.0, length: 1.0 })).collect::<Vec<_>>()
         }).unwrap_or_default();
         eprintln!("monster {name}: level {level} life {max_hp} damage {damage}");
-        Enemy { mesh: m, base, name, max_hp, damage, clips, rig, state: 0, state_time: 0.0, home: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), dead_time: 0.0, mults, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), heading: 0.0, hp: max_hp }
-    });
+        Enemy { mesh: m, base, name, max_hp, damage, clips, rig, state: 0, state_time: 0.0, home: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)) + glam::Vec2::new(0.0, (n as f32 - (pack as f32 - 1.0) / 2.0) * 160.0), dead_time: 0.0, mults, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)) + glam::Vec2::new(0.0, (n as f32 - (pack as f32 - 1.0) / 2.0) * 160.0), heading: 0.0, hp: max_hp, cooldown: 0.0 }
+    }).collect();
     poe2_bundles::room::recompute_bbox(&mut all);
     let center = mesh_center(&all);
 
@@ -1295,7 +1306,7 @@ fn show_play(
     let level_table: Vec<(i64, f64)> = std::env::var_os("POE2_SCHEMA")
         .map(|sd| (1..=20).filter_map(|l| poe2_bundles::monster::level_stats(idx, dir, std::path::Path::new(&sd), l).ok()).collect())
         .unwrap_or_default();
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, walkable, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, weapons, weapon_ix: 0, held_ranges, start_hit: pstats.1, start_swing: pstats.2, enemy_cooldown: 0.0, status: String::new() })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemies, hit_done: false, walkable, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, weapons, weapon_ix: 0, held_ranges, start_hit: pstats.1, start_swing: pstats.2, status: String::new() })
 }
 
 impl ApplicationHandler for App {
