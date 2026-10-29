@@ -1069,6 +1069,7 @@ fn show_play(
             eprintln!("monster clips (idle, run, attack, death): {:?}", list.iter().map(|c| c.is_some()).collect::<Vec<_>>());
             list.into_iter().map(|c| c.unwrap_or(Clip { tracks: Vec::new(), fps: 30.0, length: 1.0 })).collect::<Vec<_>>()
         }).unwrap_or_default();
+        eprintln!("monster {name}: level {level} life {max_hp} damage {damage}");
         Enemy { mesh: m, base, name, max_hp, damage, clips, rig, state: 0, state_time: 0.0, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), heading: 0.0, hp: max_hp }
     });
     poe2_bundles::room::recompute_bbox(&mut all);
