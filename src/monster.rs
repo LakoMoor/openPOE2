@@ -87,6 +87,8 @@ pub struct PlayerStats {
     pub roll_ms: i64,
     /// Name of the starting weapon, when its `WeaponTypes` row was found (its damage and speed replace the unarmed ones).
     pub weapon: Option<String>,
+    /// `.ao` of the weapon as held in the hand (`ItemVisualIdentity.AOFile2`), lower case.
+    pub weapon_model: Option<String>,
 }
 
 /// Find the class whose Id is a prefix of the character's `.ao` file name (e.g. `strfourb` -> `StrFour`).
@@ -106,7 +108,7 @@ pub fn player_stats(idx: &Index, dir: &Path, schema_dir: &Path, ao_path: &str) -
         let id = row.iter().find_map(|(k, v)| match v { Value::Str(s) if k == "Id" => Some(s.to_ascii_lowercase()), _ => None }).unwrap_or_default();
         let name = id.rsplit('/').next().unwrap_or("").to_string();
         if !name.is_empty() && stem.starts_with(&name) && best.as_ref().is_none_or(|(l, _)| name.len() > *l) {
-            best = Some((name.len(), PlayerStats { life: get("BaseMaxLife"), min_damage: get("MinDamage"), max_damage: get("MaxDamage"), attack_ms: get("WeaponSpeed"), roll_ms: 0, weapon: None }));
+            best = Some((name.len(), PlayerStats { life: get("BaseMaxLife"), min_damage: get("MinDamage"), max_damage: get("MaxDamage"), attack_ms: get("WeaponSpeed"), roll_ms: 0, weapon: None, weapon_model: None }));
             weapon_ref = row.iter().find_map(|(k, v)| match v { Value::List(l) if k == "StartWeapons" => l.first().cloned(), _ => None });
             roll_ref = row.iter().find_map(|(k, v)| match v { Value::List(l) if k == "StartingSkill" => l.first().cloned(), _ => None });
         }
@@ -139,6 +141,7 @@ pub fn player_stats(idx: &Index, dir: &Path, schema_dir: &Path, ao_path: &str) -
                     stats.min_damage = get("DamageMin").unwrap_or(stats.min_damage);
                     stats.max_damage = get("DamageMax").unwrap_or(stats.max_damage);
                     stats.attack_ms = get("Speed").unwrap_or(stats.attack_ms);
+                    stats.weapon_model = held_model(idx, dir, &schema, item as usize);
                     stats.weapon = item_name(idx, dir, &schema, item as usize).or_else(|| Some(format!("base item {item}")));
                     break;
                 }
@@ -208,4 +211,16 @@ pub fn weapons(idx: &Index, dir: &Path, schema_dir: &Path, max_drop_level: i64) 
     }
     out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(&b.1.name)));
     Ok(out.into_iter().map(|(_, w)| w).collect())
+}
+
+/// Held-weapon model of a `BaseItemTypes` row, through its `ItemVisualIdentity`.
+pub fn held_model(idx: &Index, dir: &Path, schema: &Schema, row: usize) -> Option<String> {
+    let bytes = idx.read_file(dir, "data/balance/baseitemtypes.datc64").ok()?;
+    let table = Table::parse(&bytes).ok()?;
+    let r = table.decode_row(schema.table("baseitemtypes")?, row).ok()?;
+    let Some((_, Value::Ref(Some(v)))) = r.iter().find(|(k, _)| k == "ItemVisualIdentity") else { return None };
+    let vb = idx.read_file(dir, "data/balance/itemvisualidentity.datc64").ok()?;
+    let vt = Table::parse(&vb).ok()?;
+    let vr = vt.decode_row(schema.table("itemvisualidentity")?, *v as usize).ok()?;
+    vr.iter().find_map(|(k, x)| match x { Value::Str(s) if k == "AOFile2" && !s.is_empty() => Some(s.to_ascii_lowercase()), _ => None })
 }

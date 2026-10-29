@@ -1043,7 +1043,14 @@ fn show_play(
     let (world_mesh, mut textures) = load(world)?;
     let (mut char_mesh, mut char_tex) = load(character)?;
     // Weapon: a sword model skinned rigidly to the right wrist (grip placement is a guess).
-    let weapon_path = std::env::var("POE2_WEAPON").unwrap_or_else(|_| "art/models/items/weapons/onehandweapons/onehandswords/basetypes/broadsword.fmt".into());
+    // The class's starting weapon (when a dat schema is given); otherwise a broadsword.
+    let held = std::env::var_os("POE2_SCHEMA")
+        .and_then(|sd| poe2_bundles::monster::player_stats(idx, dir, std::path::Path::new(&sd), character).ok())
+        .and_then(|p| p.weapon_model);
+    let weapon_path = std::env::var("POE2_WEAPON")
+        .ok()
+        .or(held)
+        .unwrap_or_else(|| "art/models/items/weapons/onehandweapons/onehandswords/basetypes/broadsword.fmt".into());
     if weapon_path != "none" {
         if let (Some(rig), Some((w, wtex))) = (char_mesh.rig.clone(), load(&weapon_path)) {
             if let Some(bone) = rig.index_of("R_wrist_jntBnd") {

@@ -8,7 +8,7 @@ Offline Rust reimplementation of Path of Exile 2 that reads the user's own insta
 - Numbers from tables: player life/damage/swing speed/roll time (`Characters`, `GrantedEffects`), monster life/damage (`DefaultMonsterStats` x `MonsterVarieties`).
 
 ## Status notes (2026-10-29)
-- Item 3 partly done: `BaseItemTypes` reads (first 217 bytes of the row), the class's starting weapon sets player damage and swing speed through `WeaponTypes`. Tab cycles weapons with drop level <= 1 (damage and swing speed from `WeaponTypes`); the weapon model in hand does not change.
+- Item 3 partly done: `BaseItemTypes` reads (first 217 bytes of the row), the class's starting weapon sets player damage and swing speed through `WeaponTypes`. Tab cycles weapons with drop level <= 1 (damage and swing speed from `WeaponTypes`); the model in hand is the class start weapon (`BaseItemTypes` -> `ItemVisualIdentity.AOFile2`) and does not follow Tab yet.
 - Item 1 blocked on Ghidra: no camera constants in data files or client strings.
 - Item 4 findings: `Stats` decodes; `Mods` is now readable (all 16784 rows): every `StatNValue` is a (min, max) interval in this build and `Stat8Min/MaxHardmode` are gone; fixed in `schema_overrides.txt`. `GameConstants` and `ExperienceLevels` have no community schema; `GameConstants` is 16-byte rows (name, value, divisor) and holds ailment, stun and monster-defence constants but no attribute-to-life ratios.
 
