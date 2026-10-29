@@ -679,7 +679,11 @@ fn screenshot_world(
         (0..n).for_each(|_| play.next_weapon());
     }
     let steps = (seconds * 60.0).max(1.0) as u32;
+    let keep_attacking = std::env::var_os("POE2_ATTACK").is_some_and(|v| v == "loop");
     for i in 0..steps {
+        if keep_attacking && play.attack.is_none() {
+            play.attack = Some(0.0);
+        }
         play.step(1.0 / 60.0, &mut cam, i as f32 / 60.0, &mut renderer);
     }
     capture(&renderer, size, &cam, out)
