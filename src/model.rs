@@ -101,7 +101,11 @@ pub fn load_mesh(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
             let slots = tgt.subtile_runs.get(line).map(|r| crate::terrain::expand_runs(r)).unwrap_or_default();
             crate::terrain::append(&mut out, &tgm.main, &slots, &tgt.materials);
             // The ground layer has no material list in the .tgt; draw it untextured.
+            let first_ground = out.shapes.len();
             crate::terrain::append(&mut out, &tgm.ground, &[], &tgt.materials);
+            for sh in &mut out.shapes[first_ground..] {
+                sh.name = "ground".into();
+            }
         }
     }
     out.bbox = bbox.unwrap_or_default();
@@ -215,12 +219,32 @@ fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
                 let mesh = tile_cache.entry(t.tgt.clone()).or_insert_with(|| load_mesh(idx, dir, &t.tgt.to_ascii_lowercase()).ok()).as_ref()?;
                 let b = mesh.bbox;
                 let (cx, cy) = ((b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0);
-                let angle = rot as f32 * std::f32::consts::FRAC_PI_2;
+                let sign = if std::env::var_os("POE2_ROT_NEG").is_some() { -1.0 } else { 1.0 };
+                let angle = sign * rot as f32 * std::f32::consts::FRAC_PI_2;
                 let (sn, cs) = angle.sin_cos();
                 let unit = room::CELL * room::CELLS_PER_SIDE as f32;
                 let target = [(slot.col as f32 + slot.w as f32 / 2.0) * unit, (slot.row as f32 + slot.h as f32 / 2.0) * unit];
                 let offset = [target[0] - (cx * cs - cy * sn), target[1] - (cx * sn + cy * cs), 0.0];
-                room::append_placed(&mut out, mesh, angle, 1.0, offset);
+                // The tile's ground layer has no material of its own: use the slot's ground type.
+                let gt = slot.grounds.iter().flatten().next();
+                let mut mesh = mesh.clone();
+                if let Some(gt) = gt {
+                    let mat = ground.material(idx, dir, gt);
+                    let unit = room::CELL * room::CELLS_PER_SIDE as f32;
+                    for sh in mesh.shapes.iter_mut().filter(|s| s.name == "ground" && s.material.is_empty()) {
+                        sh.material = mat.clone();
+                        let range = sh.first_index as usize..(sh.first_index + sh.index_count) as usize;
+                        for &i in &mesh.indices[range] {
+                            let p = mesh.positions[i as usize];
+                            mesh.uvs[i as usize] = [p[0] / unit, p[1] / unit];
+                        }
+                    }
+                }
+                if std::env::var_os("POE2_DEBUG").is_some() {
+                    let g: Vec<_> = mesh.shapes.iter().filter(|s| s.name == "ground").collect();
+                    eprintln!("tile {}: {} ground shapes, {} indices, material {:?}", t.tgt, g.len(), g.iter().map(|s| s.index_count).sum::<u32>(), g.first().map(|s| s.material.clone()));
+                }
+                room::append_placed(&mut out, &mesh, angle, 1.0, offset);
                 Some(())
             });
             if placed.is_some() {
@@ -230,7 +254,9 @@ fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
             }
         }
         eprintln!("{path}: {tiled} of {} slots use real tiles", r.slots.len());
-        room::ground_from_slots(&mut out, &flat, &|gt: &str| ground.material(idx, dir, gt));
+        // Tiles only carry features and edge decals; the floor underneath is the slot ground.
+        let _ = flat;
+        room::ground_from_slots(&mut out, &r.slots, &|gt: &str| ground.material(idx, dir, gt));
     }
 
     let mut cache: HashMap<String, Option<Mesh>> = HashMap::new();

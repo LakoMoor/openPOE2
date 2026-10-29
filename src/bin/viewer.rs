@@ -547,7 +547,7 @@ fn screenshot(
         renderer.set_animation(mesh, vec![clip], 0, mesh_center(mesh));
         renderer.animate(time, Mat4::IDENTITY);
     }
-    capture(&renderer, size, &Camera { yaw, pitch: 0.25, zoom: 1.0, target: Vec3::ZERO }, out)
+    capture(&renderer, size, &Camera { yaw, pitch: std::env::var("POE2_PITCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25), zoom: 1.0, target: Vec3::ZERO }, out)
 }
 
 /// Render the character standing (or, with `run`, running for `seconds`) in a world.

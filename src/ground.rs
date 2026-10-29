@@ -83,7 +83,7 @@ pub fn parse_mtd(bytes: &[u8]) -> HashMap<String, String> {
             let mut mats = Vec::new();
             for _ in 0..n {
                 if let Some(Token::Str(m)) = toks.get(*i) {
-                    mats.push(m.clone());
+                    mats.push(m.replace('\\', "/"));
                     *i += 1;
                 }
                 while toks.get(*i).is_some_and(is_dlp) {

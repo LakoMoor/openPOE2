@@ -13,6 +13,11 @@ fn main() -> Result<()> {
         lo = lo.min(p[2]);
         hi = hi.max(p[2]);
     }
+    if let Some(out) = a.get(3) {
+        let text: String = m.positions.iter().map(|p| format!("{} {} {}
+", p[0], p[1], p[2])).collect();
+        std::fs::write(out, text)?;
+    }
     println!("z {lo}..{hi}, {} vertices", m.positions.len());
     Ok(())
 }

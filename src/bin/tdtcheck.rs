@@ -7,6 +7,16 @@ fn main() {
         match tdt::parse_full(&std::fs::read(&p).unwrap()) {
             Ok(t) => {
                 ok += 1;
+                if let Some(out) = std::env::var_os("DUMPNODES") {
+                    let mut text = String::new();
+                    for (i, n) in t.nodes.iter().enumerate() {
+                        if let Some(g) = &n.grid {
+                            text.push_str(&format!("{i} {} {}
+", n.flags, (0..529).map(|c| g.get(c).to_string()).collect::<Vec<_>>().join(" ")));
+                        }
+                    }
+                    std::fs::write(out, text).unwrap();
+                }
                 if std::env::var_os("MAX").is_some() {
                     let m = t.nodes.iter().filter_map(|n| n.grid.as_ref()).flat_map(|g| (0..529).map(move |i| g.get(i))).max();
                     println!("{p}: max node height {m:?}");
