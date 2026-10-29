@@ -692,6 +692,9 @@ fn screenshot_world(
         }
         play.step(1.0 / 60.0, &mut cam, i as f32 / 60.0, &mut renderer);
     }
+    if !play.walkable.is_empty() {
+        eprintln!("zone: player at ({:.0}, {:.0}), on ground: {}", play.pos.x, play.pos.y, play.on_ground(play.pos));
+    }
     capture(&renderer, size, &cam, out)
 }
 
@@ -813,6 +816,8 @@ struct Play {
     clip: usize,
     /// Ground footprints the character cannot enter.
     obstacles: Vec<[f32; 4]>,
+    /// Ground triangles (x, y) of a zone graph: the player cannot leave them. Empty for rooms.
+    walkable: Vec<[glam::Vec2; 3]>,
     enemy: Option<Enemy>,
     /// The current swing has already been resolved against the enemy.
     hit_done: bool,
@@ -886,6 +891,15 @@ const CHAR_RADIUS: f32 = 25.0;
 const ROLL_DISTANCE: f32 = 450.0;
 
 impl Play {
+    /// Whether `p` lies on a ground triangle of the zone.
+    fn on_ground(&self, p: glam::Vec2) -> bool {
+        self.walkable.iter().any(|t| {
+            let side = |a: glam::Vec2, b: glam::Vec2| (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+            let (d1, d2, d3) = (side(t[0], t[1]), side(t[1], t[2]), side(t[2], t[0]));
+            (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0) || (d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0)
+        })
+    }
+
     /// Take the next weapon from the list: damage range and swing speed follow its `WeaponTypes` row.
     fn next_weapon(&mut self) {
         if self.weapons.is_empty() {
@@ -959,7 +973,13 @@ impl Play {
         self.running = dir.length_squared() > 0.0;
         if self.running {
             let dir = dir.normalize();
+            let before = self.pos;
             self.pos += dir * speed * dt;
+            if !self.walkable.is_empty() && std::env::var_os("POE2_FREE_ROAM").is_none() && !self.on_ground(self.pos) {
+                // Slide along one axis if the full step leaves the zone, otherwise stay.
+                let (ax, ay) = (glam::Vec2::new(self.pos.x, before.y), glam::Vec2::new(before.x, self.pos.y));
+                self.pos = if self.on_ground(ax) { ax } else if self.on_ground(ay) { ay } else { before };
+            }
             // Push the character out of solid objects.
             for o in &self.obstacles {
                 let (r, p) = (CHAR_RADIUS, self.pos);
@@ -1158,6 +1178,12 @@ fn show_play(
     let base = world_mesh.positions.len();
 
     let obstacles = world_mesh.obstacles.clone();
+    let walkable: Vec<[glam::Vec2; 3]> = if world.ends_with(".tgr") {
+        let v = |i: u32| glam::Vec2::new(world_mesh.positions[i as usize][0], world_mesh.positions[i as usize][1]);
+        world_mesh.indices.chunks_exact(3).map(|t| [v(t[0]), v(t[1]), v(t[2])]).collect()
+    } else {
+        Vec::new()
+    };
     let mut all = world_mesh;
     all.joints.clear();
     all.weights.clear();
@@ -1269,7 +1295,7 @@ fn show_play(
     let level_table: Vec<(i64, f64)> = std::env::var_os("POE2_SCHEMA")
         .map(|sd| (1..=20).filter_map(|l| poe2_bundles::monster::level_stats(idx, dir, std::path::Path::new(&sd), l).ok()).collect())
         .unwrap_or_default();
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, weapons, weapon_ix: 0, held_ranges, start_hit: pstats.1, start_swing: pstats.2, enemy_cooldown: 0.0, status: String::new() })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, walkable, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, weapons, weapon_ix: 0, held_ranges, start_hit: pstats.1, start_swing: pstats.2, enemy_cooldown: 0.0, status: String::new() })
 }
 
 impl ApplicationHandler for App {
