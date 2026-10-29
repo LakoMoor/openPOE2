@@ -74,3 +74,34 @@ pub fn level_stats(idx: &Index, dir: &Path, schema_dir: &Path, level: usize) -> 
     let dmg = row.iter().find_map(|(k, v)| match (k.as_str(), v) { ("Damage", Value::Float(f)) => Some(*f as f64), _ => None }).unwrap_or(0.0);
     Ok((life, dmg))
 }
+
+/// Starting values of a player class from the `Characters` table.
+#[derive(Debug, Clone, Copy)]
+pub struct PlayerStats {
+    pub life: i64,
+    pub min_damage: i64,
+    pub max_damage: i64,
+    /// Milliseconds per unarmed attack, as stored in `WeaponSpeed`.
+    pub attack_ms: i64,
+}
+
+/// Find the class whose Id is a prefix of the character's `.ao` file name (e.g. `strfourb` -> `StrFour`).
+pub fn player_stats(idx: &Index, dir: &Path, schema_dir: &Path, ao_path: &str) -> Result<PlayerStats> {
+    let schema = Schema::load(schema_dir)?;
+    let bytes = idx.read_file(dir, "data/balance/characters.datc64")?;
+    let table = Table::parse(&bytes)?;
+    let ts = schema.table("characters").context("no schema for characters")?;
+    let want = ao_path.to_ascii_lowercase();
+    let stem = want.rsplit('/').next().unwrap_or(&want).trim_end_matches(".ao").to_string();
+    let mut best: Option<(usize, PlayerStats)> = None;
+    for i in 0..table.rows {
+        let row = table.decode_row(ts, i)?;
+        let get = |n: &str| row.iter().find_map(|(k, v)| match v { Value::Int(x) if k == n => Some(*x), _ => None }).unwrap_or(0);
+        let id = row.iter().find_map(|(k, v)| match v { Value::Str(s) if k == "Id" => Some(s.to_ascii_lowercase()), _ => None }).unwrap_or_default();
+        let name = id.rsplit('/').next().unwrap_or("").to_string();
+        if !name.is_empty() && stem.starts_with(&name) && best.as_ref().is_none_or(|(l, _)| name.len() > *l) {
+            best = Some((name.len(), PlayerStats { life: get("BaseMaxLife"), min_damage: get("MinDamage"), max_damage: get("MaxDamage"), attack_ms: get("WeaponSpeed") }));
+        }
+    }
+    best.map(|(_, s)| s).with_context(|| format!("no class for {ao_path}"))
+}

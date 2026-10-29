@@ -788,6 +788,10 @@ struct Play {
     /// The current swing has already been resolved against the enemy.
     hit_done: bool,
     player_hp: i32,
+    player_max_hp: i32,
+    /// Damage range of an unarmed hit and the number of swings so far (the roll cycles through the range).
+    hit_range: (i32, i32),
+    swings: u32,
     /// Seconds until the monster can strike again.
     enemy_cooldown: f32,
     /// Text for the window title.
@@ -844,7 +848,9 @@ impl Play {
                 if let Some(e) = self.enemy.as_mut().filter(|e| e.hp > 0) {
                     let to = e.pos - self.pos;
                     if to.length() < HIT_RANGE && to.normalize_or_zero().dot(fwd) > 0.3 {
-                        e.hp -= HIT_DAMAGE;
+                        let (lo, hi) = self.hit_range;
+                        self.swings += 1;
+                        e.hp -= lo + ((self.swings * 7) % (hi - lo + 1) as u32) as i32;
                         eprintln!("hit: enemy hp {}", e.hp);
                         self.status = if e.hp > 0 { format!("{} hp {}/{}", e.name, e.hp, e.max_hp) } else { format!("{} slain", e.name) };
                     } else {
@@ -921,7 +927,7 @@ impl Play {
                     self.enemy_cooldown = ENEMY_STRIKE_INTERVAL;
                     self.player_hp = (self.player_hp - e.damage).max(0);
                     eprintln!("strike: player hp {}", self.player_hp);
-                    self.status = if self.player_hp > 0 { format!("you: {}/{PLAYER_HP} hp", self.player_hp) } else { "you died".into() };
+                    self.status = if self.player_hp > 0 { format!("you: {}/{} hp", self.player_hp, self.player_max_hp) } else { "you died".into() };
                 }
             }
             let want = if e.hp <= 0 {
@@ -1085,7 +1091,14 @@ fn show_play(
     if let Some(w) = window {
         w.set_title(&format!("openPOE2 - {character} in {world} (WASD move, Space attack, drag orbit, wheel zoom)"));
     }
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: PLAYER_HP, enemy_cooldown: 0.0, status: String::new() })
+    // Starting life and unarmed damage of the class come from the Characters table.
+    let pstats = std::env::var_os("POE2_SCHEMA")
+        .and_then(|sd| poe2_bundles::monster::player_stats(idx, dir, std::path::Path::new(&sd), character).ok())
+        .map_or((PLAYER_HP, (HIT_DAMAGE, HIT_DAMAGE)), |p| {
+            eprintln!("player: life {} damage {}-{}", p.life, p.min_damage, p.max_damage);
+            (p.life as i32, (p.min_damage as i32, p.max_damage.max(p.min_damage) as i32))
+        });
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, enemy_cooldown: 0.0, status: String::new() })
 }
 
 impl ApplicationHandler for App {

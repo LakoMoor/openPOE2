@@ -19,7 +19,7 @@ Rendered offscreen by `viewer` from a local install (game art belongs to Grindin
 |---|---|
 | ![combat](site/shots/combat.png) | ![weapon](site/shots/weapon.png) |
 
-Play mode (`viewer <Bundles2> metadata/characters/str/strfourb.ao --world <room.arm>`): WASD to run, Space to attack, simple collision with tall room objects, a training monster that chases and strikes. Combat numbers (damage, health, speeds) are invented placeholders; only the monster's name, life scale and attack interval come from the game tables (`POE2_SCHEMA=<dat-schema dir>`). Rooms use real terrain tiles matched by size and edge types (edge order N, E, S, W); `POE2_NO_TILES=1` falls back to flat ground. Known gaps: `.tdt` grids (heights, walkability) are parsed but not interpreted, zone generation is only a rough `.tgr` preview, no skills or items.
+Play mode (`viewer <Bundles2> metadata/characters/str/strfourb.ao --world <room.arm>`): WASD to run, Space to attack, simple collision with tall room objects, a training monster that chases and strikes. With `POE2_SCHEMA=<dat-schema dir>` the player's life and unarmed damage come from the `Characters` table and the monster's life and damage from `DefaultMonsterStats` x `MonsterVarieties` (level via `POE2_MON_LEVEL`); without it, and for movement speeds and strike timing, the numbers are invented placeholders. Rooms use real terrain tiles matched by size and edge types (edge order N, E, S, W); `POE2_NO_TILES=1` falls back to flat ground. Known gaps: `.tdt` grids (heights, walkability) are parsed but not interpreted, zone generation is only a rough `.tgr` preview, no skills or items.
 
 ## What works
 
