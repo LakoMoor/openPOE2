@@ -821,6 +821,9 @@ struct Play {
     roll_wanted: bool,
     /// Movement speed multiplier from affixes.
     run_mult: f32,
+    /// Base (life, damage) of a monster by level from DefaultMonsterStats, and the kills so far.
+    level_table: Vec<(i64, f64)>,
+    kills: usize,
     /// Weapons Tab cycles through, and the one in hand.
     weapons: Vec<poe2_bundles::monster::Weapon>,
     weapon_ix: usize,
@@ -845,6 +848,11 @@ struct Enemy {
     rig: Option<std::sync::Arc<poe2_bundles::skeleton::Skeleton>>,
     state: usize,
     state_time: f32,
+    home: glam::Vec2,
+    /// Seconds since it died.
+    dead_time: f32,
+    /// MonsterVarieties life and damage multipliers (percent).
+    mults: (i64, i64),
 }
 
 const ENEMY_HP: i32 = 100;
@@ -977,6 +985,20 @@ impl Play {
             let mut moving = false;
             if e.hp > 0 {
                 e.heading = to.x.atan2(-to.y);
+            } else {
+                e.dead_time += dt;
+                // A slain monster comes back stronger after a few seconds (level + kills), from DefaultMonsterStats.
+                if e.dead_time > 5.0 && !self.level_table.is_empty() {
+                    self.kills += 1;
+                    let (life, dmg) = self.level_table[self.kills.min(self.level_table.len() - 1)];
+                    e.max_hp = ((life * e.mults.0 / 100).max(1)) as i32;
+                    e.damage = (dmg * e.mults.1 as f64 / 100.0).round().max(1.0) as i32;
+                    e.hp = e.max_hp;
+                    e.pos = e.home;
+                    e.dead_time = 0.0;
+                    self.status = format!("{} (level {}) {}/{} hp", e.name, self.kills + 1, e.hp, e.max_hp);
+                    eprintln!("respawn: level {} life {} damage {}", self.kills + 1, e.max_hp, e.damage);
+                }
             }
             if e.hp > 0 && self.player_hp > 0 {
                 if dist < AGGRO && dist > STRIKE_RANGE * 0.8 {
@@ -1120,6 +1142,7 @@ fn show_play(
         let stats = std::env::var_os("POE2_SCHEMA").and_then(|sd| poe2_bundles::monster::find(idx, dir, std::path::Path::new(&sd), &monster_path).ok());
         let level = std::env::var("POE2_MON_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(1usize);
         let lvl_stats = std::env::var_os("POE2_SCHEMA").and_then(|sd| poe2_bundles::monster::level_stats(idx, dir, std::path::Path::new(&sd), level).ok());
+        let mults = stats.as_ref().map_or((100, 100), |s| (s.life_multiplier, s.damage_multiplier));
         let (name, max_hp, damage) = match (stats, lvl_stats) {
             (Some(st), Some((life, dmg))) => (st.name, ((life * st.life_multiplier / 100).max(1)) as i32, (dmg * st.damage_multiplier as f64 / 100.0).round().max(1.0) as i32),
             (Some(st), None) => (st.name, (ENEMY_HP as i64 * st.life_multiplier / 100) as i32, ENEMY_DAMAGE),
@@ -1144,7 +1167,7 @@ fn show_play(
             list.into_iter().map(|c| c.unwrap_or(Clip { tracks: Vec::new(), fps: 30.0, length: 1.0 })).collect::<Vec<_>>()
         }).unwrap_or_default();
         eprintln!("monster {name}: level {level} life {max_hp} damage {damage}");
-        Enemy { mesh: m, base, name, max_hp, damage, clips, rig, state: 0, state_time: 0.0, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), heading: 0.0, hp: max_hp }
+        Enemy { mesh: m, base, name, max_hp, damage, clips, rig, state: 0, state_time: 0.0, home: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), dead_time: 0.0, mults, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), heading: 0.0, hp: max_hp }
     });
     poe2_bundles::room::recompute_bbox(&mut all);
     let center = mesh_center(&all);
@@ -1197,7 +1220,10 @@ fn show_play(
             }
         }
     }
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, weapons, weapon_ix: 0, enemy_cooldown: 0.0, status: String::new() })
+    let level_table: Vec<(i64, f64)> = std::env::var_os("POE2_SCHEMA")
+        .map(|sd| (1..=20).filter_map(|l| poe2_bundles::monster::level_stats(idx, dir, std::path::Path::new(&sd), l).ok()).collect())
+        .unwrap_or_default();
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, weapons, weapon_ix: 0, enemy_cooldown: 0.0, status: String::new() })
 }
 
 impl ApplicationHandler for App {
