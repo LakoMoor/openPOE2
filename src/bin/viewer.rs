@@ -975,7 +975,38 @@ fn show_play(
         }
     };
     let (world_mesh, mut textures) = load(world)?;
-    let (char_mesh, char_tex) = load(character)?;
+    let (mut char_mesh, mut char_tex) = load(character)?;
+    // Weapon: a sword model skinned rigidly to the right wrist (grip placement is a guess).
+    let weapon_path = std::env::var("POE2_WEAPON").unwrap_or_else(|_| "art/models/items/weapons/onehandweapons/onehandswords/basetypes/broadsword.fmt".into());
+    if weapon_path != "none" {
+        if let (Some(rig), Some((w, wtex))) = (char_mesh.rig.clone(), load(&weapon_path)) {
+            if let Some(bone) = rig.index_of("R_wrist_jntBnd") {
+                let b = w.bbox;
+                // Grip near the pommel end (largest z, since up is -z), centred on the blade axis.
+                let grip = Vec3::new((b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0, b[5] - (b[5] - b[4]) * 0.15);
+                let rest = rig.world(bone);
+                let wrist = rest.transform_point3(Vec3::ZERO);
+                let spin: f32 = std::env::var("POE2_WEAPON_SPIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                let rot = Mat4::from_rotation_z(spin.to_radians()) * Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+                let xf = Mat4::from_translation(wrist) * rot * Mat4::from_translation(-grip);
+                let base = char_mesh.positions.len() as u32;
+                char_mesh.positions.extend(w.positions.iter().map(|p| xf.transform_point3(Vec3::from(*p)).to_array()));
+                char_mesh.normals.extend(w.normals.iter().map(|n| (rot.transform_vector3(Vec3::from(*n))).to_array()));
+                char_mesh.uvs.extend_from_slice(&w.uvs);
+                char_mesh.joints.extend(w.positions.iter().map(|_| [bone as u8, 0, 0, 0]));
+                char_mesh.weights.extend(w.positions.iter().map(|_| [255, 0, 0, 0]));
+                let first = char_mesh.indices.len() as u32;
+                char_mesh.indices.extend(w.indices.iter().map(|i| i + base));
+                char_mesh.shapes.extend(w.shapes.iter().map(|sh| {
+                    let mut sh = sh.clone();
+                    sh.first_index += first;
+                    sh
+                }));
+                char_tex.extend(wtex);
+                poe2_bundles::room::recompute_bbox(&mut char_mesh);
+            }
+        }
+    }
     let wb = world_mesh.bbox;
     let start = glam::Vec2::new((wb[0] + wb[1]) / 2.0, (wb[2] + wb[3]) / 2.0);
     let base = world_mesh.positions.len();
