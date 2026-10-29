@@ -728,6 +728,8 @@ struct Enemy {
     pos: glam::Vec2,
     heading: f32,
     hp: i32,
+    max_hp: i32,
+    name: String,
 }
 
 const ENEMY_HP: i32 = 100;
@@ -758,7 +760,7 @@ impl Play {
                     if to.length() < HIT_RANGE && to.normalize_or_zero().dot(fwd) > 0.3 {
                         e.hp -= HIT_DAMAGE;
                         eprintln!("hit: enemy hp {}", e.hp);
-                        self.status = if e.hp > 0 { format!("enemy hp {}/{ENEMY_HP}", e.hp) } else { "enemy slain".into() };
+                        self.status = if e.hp > 0 { format!("{} hp {}/{}", e.name, e.hp, e.max_hp) } else { format!("{} slain", e.name) };
                         if e.hp <= 0 {
                             renderer.write_static(e.base, &e.mesh, self.center, e.pos, e.heading, false);
                         }
@@ -890,7 +892,10 @@ fn show_play(
             s
         }));
         textures.extend(tex);
-        Enemy { mesh: m, base, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), heading: 0.0, hp: ENEMY_HP }
+        // Name and life scale come from MonsterVarieties when a dat schema is available.
+        let stats = std::env::var_os("POE2_SCHEMA").and_then(|sd| poe2_bundles::monster::find(idx, dir, std::path::Path::new(&sd), &monster_path).ok());
+        let (name, max_hp) = stats.map_or_else(|| ("training monster".to_string(), ENEMY_HP), |st| (st.name, (ENEMY_HP as i64 * st.life_multiplier / 100) as i32));
+        Enemy { mesh: m, base, name, max_hp, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), heading: 0.0, hp: max_hp }
     });
     poe2_bundles::room::recompute_bbox(&mut all);
     let center = mesh_center(&all);
