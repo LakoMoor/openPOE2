@@ -819,6 +819,8 @@ struct Play {
     roll_secs: f32,
     /// Set by the roll key; consumed on the next step.
     roll_wanted: bool,
+    /// Movement speed multiplier from affixes.
+    run_mult: f32,
     /// Weapons Tab cycles through, and the one in hand.
     weapons: Vec<poe2_bundles::monster::Weapon>,
     weapon_ix: usize,
@@ -916,7 +918,7 @@ impl Play {
             let d = if dir.length_squared() > 0.0 { dir.normalize() } else { glam::Vec2::new(self.heading.sin(), -self.heading.cos()) };
             self.roll = Some((0.0, d));
         }
-        let mut speed = RUN_SPEED;
+        let mut speed = RUN_SPEED * self.run_mult;
         if let Some((t, d)) = self.roll.as_mut() {
             *t += dt;
             dir = *d;
@@ -1169,6 +1171,7 @@ fn show_play(
         .unwrap_or_default();
     // Affixes from the Mods table, e.g. POE2_MODS=IncreasedLife1: the stats the engine knows are applied.
     let mut pstats = pstats;
+    let mut run_mult = 1.0f32;
     if let (Some(sd), Some(list)) = (std::env::var_os("POE2_SCHEMA"), std::env::var("POE2_MODS").ok()) {
         for id in list.split(',').filter(|m| !m.is_empty()) {
             match poe2_bundles::monster::mod_stat(idx, dir, std::path::Path::new(&sd), id) {
@@ -1176,12 +1179,25 @@ fn show_play(
                     eprintln!("mod {id} ({name}): {stat} +{v}");
                     pstats.0 += v as i32;
                 }
+                Ok((name, stat, v)) if stat == "local_physical_damage_+%" => {
+                    eprintln!("mod {id} ({name}): {stat} {v}");
+                    let f = 1.0 + v as f32 / 100.0;
+                    pstats.1 = ((pstats.1 .0 as f32 * f).round() as i32, (pstats.1 .1 as f32 * f).round() as i32);
+                }
+                Ok((name, stat, v)) if stat == "local_attack_speed_+%" => {
+                    eprintln!("mod {id} ({name}): {stat} {v}");
+                    pstats.2 = pstats.2.map(|s| s / (1.0 + v as f32 / 100.0));
+                }
+                Ok((name, stat, v)) if stat == "base_movement_velocity_+%" => {
+                    eprintln!("mod {id} ({name}): {stat} {v}");
+                    run_mult *= 1.0 + v as f32 / 100.0;
+                }
                 Ok((name, stat, v)) => eprintln!("mod {id} ({name}): {stat} {v} (not applied, unsupported stat)"),
                 Err(e) => eprintln!("mod {id}: {e:#}"),
             }
         }
     }
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, weapons, weapon_ix: 0, enemy_cooldown: 0.0, status: String::new() })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, weapons, weapon_ix: 0, enemy_cooldown: 0.0, status: String::new() })
 }
 
 impl ApplicationHandler for App {
