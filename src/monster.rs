@@ -224,3 +224,27 @@ pub fn held_model(idx: &Index, dir: &Path, schema: &Schema, row: usize) -> Optio
     let vr = vt.decode_row(schema.table("itemvisualidentity")?, *v as usize).ok()?;
     vr.iter().find_map(|(k, x)| match x { Value::Str(s) if k == "AOFile2" && !s.is_empty() => Some(s.to_ascii_lowercase()), _ => None })
 }
+
+/// First stat of a `Mods` row looked up by Id: (affix name, stat id, lowest roll).
+pub fn mod_stat(idx: &Index, dir: &Path, schema_dir: &Path, mod_id: &str) -> Result<(String, String, i64)> {
+    let schema = Schema::load(schema_dir)?;
+    let mb = idx.read_file(dir, "data/balance/mods.datc64")?;
+    let mt = Table::parse(&mb)?;
+    let mts = schema.table("mods").context("no schema for mods")?;
+    let sb = idx.read_file(dir, "data/balance/stats.datc64")?;
+    let st = Table::parse(&sb)?;
+    let sts = schema.table("stats").context("no schema for stats")?;
+    for i in 0..mt.rows {
+        let row = mt.decode_row(mts, i)?;
+        if !row.iter().any(|(k, v)| k == "Id" && matches!(v, Value::Str(s) if s.eq_ignore_ascii_case(mod_id))) {
+            continue;
+        }
+        let name = row.iter().find_map(|(k, v)| match v { Value::Str(s) if k == "Name" => Some(s.clone()), _ => None }).unwrap_or_default();
+        let value = row.iter().find_map(|(k, v)| match v { Value::Int(x) if k == "Stat1Value" => Some(*x), _ => None }).unwrap_or(0);
+        let Some(Value::Ref(Some(stat))) = row.iter().find(|(k, _)| k == "Stat1").map(|(_, v)| v.clone()) else { anyhow::bail!("mod {mod_id} has no stat") };
+        let srow = st.decode_row(sts, stat as usize)?;
+        let stat_id = srow.iter().find_map(|(k, v)| match v { Value::Str(s) if k == "Id" => Some(s.clone()), _ => None }).unwrap_or_default();
+        return Ok((name, stat_id, value));
+    }
+    anyhow::bail!("no mod {mod_id}")
+}

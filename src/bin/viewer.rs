@@ -1167,6 +1167,20 @@ fn show_play(
     let weapons = std::env::var_os("POE2_SCHEMA")
         .and_then(|sd| poe2_bundles::monster::weapons(idx, dir, std::path::Path::new(&sd), 1).ok())
         .unwrap_or_default();
+    // Affixes from the Mods table, e.g. POE2_MODS=IncreasedLife1: the stats the engine knows are applied.
+    let mut pstats = pstats;
+    if let (Some(sd), Some(list)) = (std::env::var_os("POE2_SCHEMA"), std::env::var("POE2_MODS").ok()) {
+        for id in list.split(',').filter(|m| !m.is_empty()) {
+            match poe2_bundles::monster::mod_stat(idx, dir, std::path::Path::new(&sd), id) {
+                Ok((name, stat, v)) if stat == "base_maximum_life" => {
+                    eprintln!("mod {id} ({name}): {stat} +{v}");
+                    pstats.0 += v as i32;
+                }
+                Ok((name, stat, v)) => eprintln!("mod {id} ({name}): {stat} {v} (not applied, unsupported stat)"),
+                Err(e) => eprintln!("mod {id}: {e:#}"),
+            }
+        }
+    }
     Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, weapons, weapon_ix: 0, enemy_cooldown: 0.0, status: String::new() })
 }
 
