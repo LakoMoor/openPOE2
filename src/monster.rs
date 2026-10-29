@@ -126,8 +126,7 @@ pub fn player_stats(idx: &Index, dir: &Path, schema_dir: &Path, ao_path: &str) -
             }
         }
     }
-    // The starting weapon: BaseItemTypes row -> WeaponTypes row (damage, speed). Its name is read from
-    // BaseItemTypes with the raw layout, because that table's schema does not match this build.
+    // The starting weapon: BaseItemTypes row -> WeaponTypes row (damage, speed).
     if let Some(Value::Ref(Some(item))) = weapon_ref {
         let wt_bytes = idx.read_file(dir, "data/balance/weapontypes.datc64")?;
         let wt = Table::parse(&wt_bytes)?;
@@ -140,11 +139,20 @@ pub fn player_stats(idx: &Index, dir: &Path, schema_dir: &Path, ao_path: &str) -
                     stats.min_damage = get("DamageMin").unwrap_or(stats.min_damage);
                     stats.max_damage = get("DamageMax").unwrap_or(stats.max_damage);
                     stats.attack_ms = get("Speed").unwrap_or(stats.attack_ms);
-                    stats.weapon = Some(format!("base item {item}"));
+                    stats.weapon = item_name(idx, dir, &schema, item as usize).or_else(|| Some(format!("base item {item}")));
                     break;
                 }
             }
         }
     }
     Ok(stats)
+}
+
+/// Display name of a `BaseItemTypes` row.
+pub fn item_name(idx: &Index, dir: &Path, schema: &Schema, row: usize) -> Option<String> {
+    let bytes = idx.read_file(dir, "data/balance/baseitemtypes.datc64").ok()?;
+    let table = Table::parse(&bytes).ok()?;
+    let ts = schema.table("baseitemtypes")?;
+    let r = table.decode_row(ts, row).ok()?;
+    r.iter().find_map(|(k, v)| match v { Value::Str(s) if k == "Name" => Some(s.clone()), _ => None })
 }
