@@ -693,9 +693,12 @@ struct Play {
     /// Seconds into the current clip, and which clip that was.
     clip_time: f32,
     clip: usize,
+    /// Ground footprints the character cannot enter.
+    obstacles: Vec<[f32; 4]>,
 }
 
 const RUN_SPEED: f32 = 350.0;
+const CHAR_RADIUS: f32 = 25.0;
 
 impl Play {
     fn step(&mut self, dt: f32, cam: &mut Camera, clock: f32, renderer: &mut Renderer) {
@@ -717,6 +720,24 @@ impl Play {
         if self.running {
             let dir = dir.normalize();
             self.pos += dir * RUN_SPEED * dt;
+            // Push the character out of solid objects.
+            for o in &self.obstacles {
+                let (r, p) = (CHAR_RADIUS, self.pos);
+                let (cx, cy) = (p.x.clamp(o[0], o[2]), p.y.clamp(o[1], o[3]));
+                let (dx, dy) = (p.x - cx, p.y - cy);
+                let d2 = dx * dx + dy * dy;
+                if d2 < r * r {
+                    if d2 > 1e-6 {
+                        let d = d2.sqrt();
+                        self.pos += glam::Vec2::new(dx, dy) / d * (r - d);
+                    } else {
+                        // Centre inside the box: leave through the nearest side.
+                        let opts = [(p.x - o[0], -1.0, 0.0), (o[2] - p.x, 1.0, 0.0), (p.y - o[1], 0.0, -1.0), (o[3] - p.y, 0.0, 1.0)];
+                        let m = opts.iter().min_by(|a, b| a.0.total_cmp(&b.0)).unwrap();
+                        self.pos += glam::Vec2::new(m.1, m.2) * (m.0 + r);
+                    }
+                }
+            }
             // The model faces -Y; turn smoothly towards the movement direction.
             let want = dir.x.atan2(-dir.y);
             let tau = std::f32::consts::TAU;
@@ -774,6 +795,7 @@ fn show_play(
     let start = glam::Vec2::new((wb[0] + wb[1]) / 2.0, (wb[2] + wb[3]) / 2.0);
     let base = world_mesh.positions.len();
 
+    let obstacles = world_mesh.obstacles.clone();
     let mut all = world_mesh;
     all.joints.clear();
     all.weights.clear();
@@ -801,7 +823,7 @@ fn show_play(
     if let Some(w) = window {
         w.set_title(&format!("openPOE2 - {character} in {world} (WASD move, Space attack, drag orbit, wheel zoom)"));
     }
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0 })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles })
 }
 
 impl ApplicationHandler for App {

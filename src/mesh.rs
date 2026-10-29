@@ -29,6 +29,8 @@ pub struct Mesh {
     pub rig: Option<std::sync::Arc<crate::skeleton::Skeleton>>,
     pub shapes: Vec<Shape>,
     pub bbox: [f32; 6],
+    /// Axis-aligned ground footprints `[x0, y0, x1, y1]` of solid objects (rooms only).
+    pub obstacles: Vec<[f32; 4]>,
 }
 
 pub(crate) struct Cur<'a> {
@@ -236,7 +238,7 @@ fn parse_smd_v1_2(c: &mut Cur, version: u8) -> Result<Mesh> {
     for (s, n) in shapes_out.iter_mut().zip(names) {
         s.name = n;
     }
-    Ok(Mesh { positions, normals, uvs, indices, joints, weights, shapes: shapes_out, bbox, rig: None })
+    Ok(Mesh { positions, normals, uvs, indices, joints, weights, shapes: shapes_out, bbox, rig: None, obstacles: Vec::new() })
 }
 
 pub fn parse_smd(data: &[u8]) -> Result<Mesh> {
@@ -283,7 +285,7 @@ pub fn parse_fmt(data: &[u8]) -> Result<Mesh> {
             }
         }
         let starts: Vec<u32> = refs.iter().map(|r| r.2).collect();
-        mesh = Mesh { positions, normals, uvs, indices, joints: Vec::new(), weights: Vec::new(), rig: None, shapes: shapes_from_starts(&starts, tris), bbox };
+        mesh = Mesh { positions, normals, uvs, indices, joints: Vec::new(), weights: Vec::new(), rig: None, shapes: shapes_from_starts(&starts, tris), bbox, obstacles: Vec::new() };
         shape_refs = refs;
     } else {
         mesh = dolm(&mut c)?;

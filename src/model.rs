@@ -277,10 +277,24 @@ fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
         let part = cache.entry(mesh_path.clone()).or_insert_with(|| load_mesh(idx, dir, &mesh_path).ok());
         if let Some(part) = part {
             room::append_placed(&mut out, part, d.rotation, d.scale, [d.x * room::CELL, d.y * room::CELL, 0.0]);
+            // Tall objects block movement; use the rotated footprint of their bounding box.
+            let b = part.bbox;
+            if (b[5] - b[4]) * d.scale > 80.0 {
+                let (sn, cs) = d.rotation.sin_cos();
+                let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                for (x, y) in [(b[0], b[2]), (b[1], b[2]), (b[1], b[3]), (b[0], b[3])] {
+                    let (px, py) = ((x * cs - y * sn) * d.scale + d.x * room::CELL, (x * sn + y * cs) * d.scale + d.y * room::CELL);
+                    x0 = x0.min(px);
+                    y0 = y0.min(py);
+                    x1 = x1.max(px);
+                    y1 = y1.max(py);
+                }
+                out.obstacles.push([x0, y0, x1, y1]);
+            }
             placed += 1;
         }
     }
-    eprintln!("{path}: version {}, {} doodads listed, {placed} placed", r.version, r.doodads.len());
+    eprintln!("{path}: version {}, {} doodads listed, {placed} placed, {} solid", r.version, r.doodads.len(), out.obstacles.len());
     room::recompute_bbox(&mut out);
     Ok(out)
 }
