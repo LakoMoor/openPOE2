@@ -585,7 +585,7 @@ fn screenshot_world(
     let mut play = show_play(idx, dir, world, character, "baseunarmed", &mut renderer, None).context("loading the world")?;
     let mut cam = Camera { yaw, pitch: 0.6, zoom: 1.0, target: Vec3::ZERO };
     // Walk forward in small steps so the camera and pose settle like in the window.
-    play.keys[0] = run;
+    play.keys[0] = run && std::env::var_os("POE2_STAY").is_none();
     if std::env::var_os("POE2_ATTACK").is_some() {
         play.attack = Some(0.0);
     }
@@ -717,6 +717,9 @@ struct Play {
     enemy: Option<Enemy>,
     /// The current swing has already been resolved against the enemy.
     hit_done: bool,
+    player_hp: i32,
+    /// Seconds until the monster can strike again.
+    enemy_cooldown: f32,
     /// Text for the window title.
     status: String,
 }
@@ -735,6 +738,13 @@ struct Enemy {
 const ENEMY_HP: i32 = 100;
 const HIT_DAMAGE: i32 = 34;
 const HIT_RANGE: f32 = 220.0;
+// Invented sandbox numbers: the monster chases inside AGGRO, strikes inside STRIKE_RANGE.
+const PLAYER_HP: i32 = 200;
+const AGGRO: f32 = 900.0;
+const STRIKE_RANGE: f32 = 160.0;
+const ENEMY_SPEED: f32 = 220.0;
+const ENEMY_DAMAGE: i32 = 20;
+const ENEMY_STRIKE_INTERVAL: f32 = 1.62; // MonsterVarieties.AttackSpeed of the Flathead Clubber, in seconds
 
 const RUN_SPEED: f32 = 350.0;
 const CHAR_RADIUS: f32 = 25.0;
@@ -824,6 +834,19 @@ impl Play {
             // Face the player.
             let to = self.pos - e.pos;
             e.heading = to.x.atan2(-to.y);
+            let dist = to.length();
+            if self.player_hp > 0 {
+                if dist < AGGRO && dist > STRIKE_RANGE * 0.8 {
+                    e.pos += to / dist * ENEMY_SPEED * dt;
+                }
+                self.enemy_cooldown = (self.enemy_cooldown - dt).max(0.0);
+                if dist <= STRIKE_RANGE && self.enemy_cooldown == 0.0 {
+                    self.enemy_cooldown = ENEMY_STRIKE_INTERVAL;
+                    self.player_hp = (self.player_hp - ENEMY_DAMAGE).max(0);
+                    eprintln!("strike: player hp {}", self.player_hp);
+                    self.status = if self.player_hp > 0 { format!("you: {}/{PLAYER_HP} hp", self.player_hp) } else { "you died".into() };
+                }
+            }
             renderer.write_static(e.base, &e.mesh, self.center, e.pos, e.heading, true);
         }
         let c = self.center;
@@ -910,7 +933,7 @@ fn show_play(
     if let Some(w) = window {
         w.set_title(&format!("openPOE2 - {character} in {world} (WASD move, Space attack, drag orbit, wheel zoom)"));
     }
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, status: String::new() })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: PLAYER_HP, enemy_cooldown: 0.0, status: String::new() })
 }
 
 impl ApplicationHandler for App {
