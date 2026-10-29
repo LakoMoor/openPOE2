@@ -387,6 +387,25 @@ impl Renderer {
         self.queue.write_buffer(&scene.vertices, offset, bytemuck::cast_slice(&vertices));
     }
 
+    /// Write a static mesh into the vertex buffer at `base`, at `pos` on the ground facing
+    /// `heading`; `alive == false` collapses it to nothing.
+    fn write_static(&self, base: usize, mesh: &mesh::Mesh, center: [f32; 3], pos: glam::Vec2, heading: f32, alive: bool) {
+        let Some(scene) = &self.scene else { return };
+        let place = Mat4::from_translation(Vec3::new(pos.x, pos.y, 0.0)) * Mat4::from_rotation_z(heading);
+        let to_view = |v: Vec3| [v.x, -v.z, v.y];
+        let vertices: Vec<Vertex> = (0..mesh.positions.len())
+            .map(|i| {
+                if !alive {
+                    return Vertex { pos: [0.0; 3], normal: [0.0, 1.0, 0.0], uv: [0.0; 2] };
+                }
+                let p = place.transform_point3(Vec3::from(mesh.positions[i])) - Vec3::from(center);
+                let n = place.transform_vector3(Vec3::from(mesh.normals[i])).normalize_or_zero();
+                Vertex { pos: to_view(p), normal: to_view(n), uv: mesh.uvs[i] }
+            })
+            .collect();
+        self.queue.write_buffer(&scene.vertices, (base * std::mem::size_of::<Vertex>()) as u64, bytemuck::cast_slice(&vertices));
+    }
+
     fn render(&self, color: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32), cam: &Camera) {
         let aspect = size.0 as f32 / size.1.max(1) as f32;
         let r = self.scene.as_ref().map_or(1.0, |s| s.radius);
@@ -695,7 +714,25 @@ struct Play {
     clip: usize,
     /// Ground footprints the character cannot enter.
     obstacles: Vec<[f32; 4]>,
+    enemy: Option<Enemy>,
+    /// The current swing has already been resolved against the enemy.
+    hit_done: bool,
+    /// Text for the window title.
+    status: String,
 }
+
+/// A training monster: loaded from the game files, static pose, takes hits.
+struct Enemy {
+    mesh: mesh::Mesh,
+    base: usize,
+    pos: glam::Vec2,
+    heading: f32,
+    hp: i32,
+}
+
+const ENEMY_HP: i32 = 100;
+const HIT_DAMAGE: i32 = 34;
+const HIT_RANGE: f32 = 220.0;
 
 const RUN_SPEED: f32 = 350.0;
 const CHAR_RADIUS: f32 = 25.0;
@@ -710,6 +747,28 @@ impl Play {
             if attack_len.is_none_or(|l| *t >= l) {
                 self.attack = None;
             }
+        }
+        // A swing connects partway through the clip.
+        match self.attack {
+            Some(t) if !self.hit_done && attack_len.is_none_or(|l| t >= l * 0.35) => {
+                self.hit_done = true;
+                let fwd = glam::Vec2::new(self.heading.sin(), -self.heading.cos());
+                if let Some(e) = self.enemy.as_mut().filter(|e| e.hp > 0) {
+                    let to = e.pos - self.pos;
+                    if to.length() < HIT_RANGE && to.normalize_or_zero().dot(fwd) > 0.3 {
+                        e.hp -= HIT_DAMAGE;
+                        eprintln!("hit: enemy hp {}", e.hp);
+                        self.status = if e.hp > 0 { format!("enemy hp {}/{ENEMY_HP}", e.hp) } else { "enemy slain".into() };
+                        if e.hp <= 0 {
+                            renderer.write_static(e.base, &e.mesh, self.center, e.pos, e.heading, false);
+                        }
+                    } else {
+                        self.status = "missed".into();
+                    }
+                }
+            }
+            None => self.hit_done = false,
+            _ => {}
         }
         let [w, a, s, d] = if self.attack.is_some() { [false; 4] } else { [w, a, s, d] };
         // Screen-relative axes on the ground plane (model x and y map to view x and z).
@@ -759,6 +818,12 @@ impl Play {
         let place = Mat4::from_translation(Vec3::new(self.pos.x, self.pos.y, 0.0)) * Mat4::from_rotation_z(self.heading);
         let _ = clock;
         renderer.animate(self.clip_time, place);
+        if let Some(e) = self.enemy.as_mut().filter(|e| e.hp > 0) {
+            // Face the player.
+            let to = self.pos - e.pos;
+            e.heading = to.x.atan2(-to.y);
+            renderer.write_static(e.base, &e.mesh, self.center, e.pos, e.heading, true);
+        }
         let c = self.center;
         cam.target = Vec3::new(self.pos.x - c[0], c[2] + 90.0, self.pos.y - c[1]);
     }
@@ -810,6 +875,23 @@ fn show_play(
         s
     }));
     textures.extend(char_tex);
+    // A training monster a few steps from the start.
+    let monster_path = std::env::var("POE2_MONSTER").unwrap_or_else(|_| "metadata/monsters/anchorite/anchoriteflathead/anchoriteflathead.ao".into());
+    let enemy = load(&monster_path).map(|(m, tex)| {
+        let base = all.positions.len();
+        all.positions.extend_from_slice(&m.positions);
+        all.normals.extend_from_slice(&m.normals);
+        all.uvs.extend_from_slice(&m.uvs);
+        let first = all.indices.len() as u32;
+        all.indices.extend(m.indices.iter().map(|i| i + base as u32));
+        all.shapes.extend(m.shapes.iter().map(|s| {
+            let mut s = s.clone();
+            s.first_index += first;
+            s
+        }));
+        textures.extend(tex);
+        Enemy { mesh: m, base, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), heading: 0.0, hp: ENEMY_HP }
+    });
     poe2_bundles::room::recompute_bbox(&mut all);
     let center = mesh_center(&all);
 
@@ -823,7 +905,7 @@ fn show_play(
     if let Some(w) = window {
         w.set_title(&format!("openPOE2 - {character} in {world} (WASD move, Space attack, drag orbit, wheel zoom)"));
     }
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, status: String::new() })
 }
 
 impl ApplicationHandler for App {
@@ -942,6 +1024,10 @@ impl ApplicationHandler for App {
                 self.clock += dt;
                 if let Some(play) = self.play.as_mut() {
                     play.step(dt, &mut self.cam, self.clock, &mut st.renderer);
+                    if !play.status.is_empty() {
+                        st.window.set_title(&format!("openPOE2 - {} (WASD move, Space attack)", play.status));
+                        play.status.clear();
+                    }
                 } else {
                     st.renderer.animate(self.clock, Mat4::IDENTITY);
                 }
