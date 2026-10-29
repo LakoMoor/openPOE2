@@ -209,8 +209,8 @@ fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
     } else {
         let ground = AreaGround::load(idx, dir, path);
         // Slots that match a tile of the area get its real geometry; the rest get flat ground.
-        // Experimental: tile rotation/ground are unverified and it breaks the town, so opt in.
-        let tiles = if std::env::var_os("POE2_TILES").is_some() { area_tiles(idx, dir, path) } else { Vec::new() };
+        // Tile rotation and edge order are only checked by eye; POE2_NO_TILES falls back to flat ground.
+        let tiles = if std::env::var_os("POE2_NO_TILES").is_none() { area_tiles(idx, dir, path) } else { Vec::new() };
         let mut tile_cache: HashMap<String, Option<Mesh>> = HashMap::new();
         let mut flat = Vec::new();
         let mut tiled = 0;
