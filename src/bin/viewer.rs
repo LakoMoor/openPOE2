@@ -929,6 +929,7 @@ impl Play {
             // Roll the way the character is moving, or the way it faces.
             let d = if dir.length_squared() > 0.0 { dir.normalize() } else { glam::Vec2::new(self.heading.sin(), -self.heading.cos()) };
             self.roll = Some((0.0, d));
+            eprintln!("roll: {:.2} s", self.roll_secs);
         }
         let mut speed = RUN_SPEED * self.run_mult;
         if let Some((t, d)) = self.roll.as_mut() {
