@@ -674,6 +674,7 @@ fn screenshot_world(
     if std::env::var_os("POE2_ATTACK").is_some() {
         play.attack = Some(0.0);
     }
+    play.roll_wanted = std::env::var_os("POE2_ROLL").is_some();
     let steps = (seconds * 60.0).max(1.0) as u32;
     for i in 0..steps {
         play.step(1.0 / 60.0, &mut cam, i as f32 / 60.0, &mut renderer);
@@ -809,6 +810,12 @@ struct Play {
     swings: u32,
     /// Seconds one swing takes (Characters.WeaponSpeed); the attack clip is played at the matching speed.
     swing_secs: Option<f32>,
+    /// Dodge roll in progress: seconds elapsed and the ground direction.
+    roll: Option<(f32, glam::Vec2)>,
+    /// Seconds a roll takes (the start skill's cast time).
+    roll_secs: f32,
+    /// Set by the roll key; consumed on the next step.
+    roll_wanted: bool,
     /// Seconds until the monster can strike again.
     enemy_cooldown: f32,
     /// Text for the window title.
@@ -845,6 +852,8 @@ const ENEMY_STRIKE_INTERVAL: f32 = 1.62; // MonsterVarieties.AttackSpeed of the 
 
 const RUN_SPEED: f32 = 350.0;
 const CHAR_RADIUS: f32 = 25.0;
+/// Ground distance covered by one dodge roll (not in the data files; an estimate).
+const ROLL_DISTANCE: f32 = 450.0;
 
 impl Play {
     fn step(&mut self, dt: f32, cam: &mut Camera, clock: f32, renderer: &mut Renderer) {
@@ -878,15 +887,29 @@ impl Play {
             None => self.hit_done = false,
             _ => {}
         }
-        let [w, a, s, d] = if self.attack.is_some() { [false; 4] } else { [w, a, s, d] };
+        let [w, a, s, d] = if self.attack.is_some() || self.roll.is_some() { [false; 4] } else { [w, a, s, d] };
         // Screen-relative axes on the ground plane (model x and y map to view x and z).
         let fwd = glam::Vec2::new(-cam.yaw.sin(), -cam.yaw.cos());
         let right = glam::Vec2::new(cam.yaw.cos(), -cam.yaw.sin());
-        let dir = fwd * (w as i32 - s as i32) as f32 + right * (d as i32 - a as i32) as f32;
+        let mut dir = fwd * (w as i32 - s as i32) as f32 + right * (d as i32 - a as i32) as f32;
+        if std::mem::take(&mut self.roll_wanted) && self.roll.is_none() && self.attack.is_none() {
+            // Roll the way the character is moving, or the way it faces.
+            let d = if dir.length_squared() > 0.0 { dir.normalize() } else { glam::Vec2::new(self.heading.sin(), -self.heading.cos()) };
+            self.roll = Some((0.0, d));
+        }
+        let mut speed = RUN_SPEED;
+        if let Some((t, d)) = self.roll.as_mut() {
+            *t += dt;
+            dir = *d;
+            speed = ROLL_DISTANCE / self.roll_secs;
+            if *t >= self.roll_secs {
+                self.roll = None;
+            }
+        }
         self.running = dir.length_squared() > 0.0;
         if self.running {
             let dir = dir.normalize();
-            self.pos += dir * RUN_SPEED * dt;
+            self.pos += dir * speed * dt;
             // Push the character out of solid objects.
             for o in &self.obstacles {
                 let (r, p) = (CHAR_RADIUS, self.pos);
@@ -913,7 +936,7 @@ impl Play {
             self.heading += diff;
         }
         if let Some(anim) = renderer.anim.as_mut() {
-            let want = if self.attack.is_some() { 2 } else { self.running as usize };
+            let want = if self.roll.is_some() && anim.clips.len() > 3 { 3 } else if self.attack.is_some() { 2 } else { self.running as usize };
             if anim.current != want && want < anim.clips.len() {
                 anim.current = want;
             }
@@ -1103,19 +1126,19 @@ fn show_play(
         sc.radius = 100.0;
     }
     let clips: Vec<Clip> =
-        ["idle_unarmed_01", "run_unarmed_01", "attack_hollowpalm_01a"].iter().filter_map(|n| load_clip(idx, dir, &format!("{set}:{n}"))).collect();
+        ["idle_unarmed_01", "run_unarmed_01", "attack_hollowpalm_01a"].iter().filter_map(|n| load_clip(idx, dir, &format!("{set}:{n}"))).chain(load_clip(idx, dir, "basedodgeroll:dodge_claw_unarmed_01")).collect();
     renderer.set_animation(&char_mesh, clips, base, center);
     if let Some(w) = window {
-        w.set_title(&format!("openPOE2 - {character} in {world} (WASD move, Space attack, drag orbit, wheel zoom)"));
+        w.set_title(&format!("openPOE2 - {character} in {world} (WASD move, Space attack, Shift roll, wheel zoom)"));
     }
     // Starting life and unarmed damage of the class come from the Characters table.
     let pstats = std::env::var_os("POE2_SCHEMA")
         .and_then(|sd| poe2_bundles::monster::player_stats(idx, dir, std::path::Path::new(&sd), character).ok())
-        .map_or((PLAYER_HP, (HIT_DAMAGE, HIT_DAMAGE), None), |p| {
-            eprintln!("player: life {} damage {}-{}", p.life, p.min_damage, p.max_damage);
-            (p.life as i32, (p.min_damage as i32, p.max_damage.max(p.min_damage) as i32), (p.attack_ms > 0).then(|| p.attack_ms as f32 / 1000.0))
+        .map_or((PLAYER_HP, (HIT_DAMAGE, HIT_DAMAGE), None, 0.75), |p| {
+            eprintln!("player: life {} damage {}-{} swing {} ms roll {} ms", p.life, p.min_damage, p.max_damage, p.attack_ms, p.roll_ms);
+            (p.life as i32, (p.min_damage as i32, p.max_damage.max(p.min_damage) as i32), (p.attack_ms > 0).then(|| p.attack_ms as f32 / 1000.0), if p.roll_ms > 0 { p.roll_ms as f32 / 1000.0 } else { 0.75 })
         });
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, enemy_cooldown: 0.0, status: String::new() })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, enemy_cooldown: 0.0, status: String::new() })
 }
 
 impl ApplicationHandler for App {
@@ -1181,6 +1204,13 @@ impl ApplicationHandler for App {
                     if p.attack.is_none() {
                         p.attack = Some(0.0);
                     }
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if self.play.is_some() && event.state == ElementState::Pressed && event.physical_key == PhysicalKey::Code(KeyCode::ShiftLeft) =>
+            {
+                if let Some(p) = self.play.as_mut() {
+                    p.roll_wanted = true;
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => match event.logical_key {

@@ -83,6 +83,8 @@ pub struct PlayerStats {
     pub max_damage: i64,
     /// Milliseconds per unarmed attack, as stored in `WeaponSpeed`.
     pub attack_ms: i64,
+    /// Cast time in ms of the class's start skill (the dodge roll), via GrantedEffectsPerLevel -> GrantedEffects.
+    pub roll_ms: i64,
 }
 
 /// Find the class whose Id is a prefix of the character's `.ao` file name (e.g. `strfourb` -> `StrFour`).
@@ -94,14 +96,31 @@ pub fn player_stats(idx: &Index, dir: &Path, schema_dir: &Path, ao_path: &str) -
     let want = ao_path.to_ascii_lowercase();
     let stem = want.rsplit('/').next().unwrap_or(&want).trim_end_matches(".ao").to_string();
     let mut best: Option<(usize, PlayerStats)> = None;
+    let mut roll_ref: Option<Value> = None;
     for i in 0..table.rows {
         let row = table.decode_row(ts, i)?;
         let get = |n: &str| row.iter().find_map(|(k, v)| match v { Value::Int(x) if k == n => Some(*x), _ => None }).unwrap_or(0);
         let id = row.iter().find_map(|(k, v)| match v { Value::Str(s) if k == "Id" => Some(s.to_ascii_lowercase()), _ => None }).unwrap_or_default();
         let name = id.rsplit('/').next().unwrap_or("").to_string();
         if !name.is_empty() && stem.starts_with(&name) && best.as_ref().is_none_or(|(l, _)| name.len() > *l) {
-            best = Some((name.len(), PlayerStats { life: get("BaseMaxLife"), min_damage: get("MinDamage"), max_damage: get("MaxDamage"), attack_ms: get("WeaponSpeed") }));
+            best = Some((name.len(), PlayerStats { life: get("BaseMaxLife"), min_damage: get("MinDamage"), max_damage: get("MaxDamage"), attack_ms: get("WeaponSpeed"), roll_ms: 0 }));
+            roll_ref = row.iter().find_map(|(k, v)| match v { Value::List(l) if k == "StartingSkill" => l.first().cloned(), _ => None });
         }
     }
-    best.map(|(_, s)| s).with_context(|| format!("no class for {ao_path}"))
+    let mut stats = best.map(|(_, s)| s).with_context(|| format!("no class for {ao_path}"))?;
+    // The start skill is a GrantedEffectsPerLevel row; its GrantedEffect carries the cast time.
+    if let Some(Value::Ref(Some(level_row))) = roll_ref {
+        let per_bytes = idx.read_file(dir, "data/balance/grantedeffectsperlevel.datc64")?;
+        let per = Table::parse(&per_bytes)?;
+        let eff_bytes = idx.read_file(dir, "data/balance/grantedeffects.datc64")?;
+        let eff = Table::parse(&eff_bytes)?;
+        if let (Some(pts), Some(ets)) = (schema.table("grantedeffectsperlevel"), schema.table("grantedeffects")) {
+            let prow = per.decode_row(pts, level_row as usize)?;
+            if let Some(Value::Ref(Some(e))) = prow.iter().find(|(k, _)| k == "GrantedEffect").map(|(_, v)| v.clone()) {
+                let erow = eff.decode_row(ets, e as usize)?;
+                stats.roll_ms = erow.iter().find_map(|(k, v)| match v { Value::Int(x) if k == "CastTime" => Some(*x), _ => None }).unwrap_or(0);
+            }
+        }
+    }
+    Ok(stats)
 }
