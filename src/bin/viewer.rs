@@ -479,7 +479,7 @@ impl Renderer {
     fn render(&self, color: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32), cam: &Camera) {
         let aspect = size.0 as f32 / size.1.max(1) as f32;
         let r = self.scene.as_ref().map_or(1.0, |s| s.radius);
-        let proj = perspective(40f32.to_radians(), aspect, r * 0.05, r * 40.0);
+        let proj = perspective(cam.fov_deg().to_radians(), aspect, r * 0.05, r * 40.0);
         let view = look_at(cam.eye(r) + cam.target, cam.target, Vec3::Y);
         let g = Globals { view_proj: (proj * view).to_cols_array_2d(), light: [0.4, 0.7, 0.6, 0.0] };
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
@@ -567,11 +567,26 @@ struct Camera {
     zoom: f32,
     /// Point the camera orbits, in view space.
     target: Vec3,
+    /// Fixed game-style isometric view: narrow field of view, 45 degree yaw, true-isometric pitch.
+    iso: bool,
 }
 
+/// Pitch of a true isometric view, atan(sqrt 2).
+const ISO_PITCH: f32 = 0.955_316_6;
+const ISO_YAW: f32 = std::f32::consts::FRAC_PI_4;
+const ISO_FOV_DEG: f32 = 20.0;
+/// Starting zoom of the game camera (a wider area than the model viewer shows).
+const ISO_ZOOM: f32 = 3.0;
+
 impl Camera {
+    fn fov_deg(&self) -> f32 {
+        if self.iso { ISO_FOV_DEG } else { 40.0 }
+    }
+
     fn eye(&self, radius: f32) -> Vec3 {
-        let d = radius * 3.4 * self.zoom;
+        // A narrower lens needs a longer lens distance to frame the same area.
+        let lens = (20f32.to_radians()).tan() / (self.fov_deg() / 2.0).to_radians().tan();
+        let d = radius * 3.4 * self.zoom * lens;
         Vec3::new(
             d * self.pitch.cos() * self.yaw.sin(),
             d * self.pitch.sin(),
@@ -636,7 +651,7 @@ fn screenshot(
         renderer.set_animation(mesh, vec![clip], 0, mesh_center(mesh));
         renderer.animate(time, Mat4::IDENTITY);
     }
-    capture(&renderer, size, &Camera { yaw, pitch: std::env::var("POE2_PITCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25), zoom: 1.0, target: Vec3::ZERO }, out)
+    capture(&renderer, size, &Camera { iso: false, yaw, pitch: std::env::var("POE2_PITCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25), zoom: 1.0, target: Vec3::ZERO }, out)
 }
 
 /// Render the character standing (or, with `run`, running for `seconds`) in a world.
@@ -653,7 +668,7 @@ fn screenshot_world(
 ) -> Result<()> {
     let mut renderer = offscreen_renderer()?;
     let mut play = show_play(idx, dir, world, character, "baseunarmed", &mut renderer, None).context("loading the world")?;
-    let mut cam = Camera { yaw, pitch: 0.6, zoom: 1.0, target: Vec3::ZERO };
+    let mut cam = Camera { iso: true, yaw: ISO_YAW, pitch: ISO_PITCH, zoom: ISO_ZOOM, target: Vec3::ZERO };
     // Walk forward in small steps so the camera and pose settle like in the window.
     play.keys[0] = run && std::env::var_os("POE2_STAY").is_none();
     if std::env::var_os("POE2_ATTACK").is_some() {
@@ -1132,7 +1147,7 @@ impl ApplicationHandler for App {
         let mut renderer = Renderer::new(device, queue, config.format);
         if let Some(world) = self.world.clone() {
             self.play = show_play(&self.idx, &self.dir, &world, &self.list[self.pos], "baseunarmed", &mut renderer, Some(&window));
-            self.cam.pitch = 0.6;
+            self.cam = Camera { iso: true, yaw: ISO_YAW, pitch: ISO_PITCH, zoom: ISO_ZOOM, target: Vec3::ZERO };
             self.auto_rotate = false;
         } else {
             show(&self.idx, &self.dir, &self.list, self.pos, self.anim_spec.as_deref(), &mut renderer, &window);
@@ -1191,7 +1206,8 @@ impl ApplicationHandler for App {
                 self.last_cursor = None;
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if self.dragging {
+                // The game camera is fixed; only the model viewer orbits.
+                if self.dragging && self.play.is_none() {
                     if let Some((lx, ly)) = self.last_cursor {
                         self.cam.yaw -= (position.x - lx) as f32 * 0.008;
                         self.cam.pitch = (self.cam.pitch + (position.y - ly) as f32 * 0.008).clamp(-1.5, 1.5);
@@ -1311,7 +1327,7 @@ fn main() -> Result<()> {
         list,
         pos: start,
         state: None,
-        cam: Camera { yaw: 0.5, pitch: 0.25, zoom: 1.0, target: Vec3::ZERO },
+        cam: Camera { iso: false, yaw: 0.5, pitch: 0.25, zoom: 1.0, target: Vec3::ZERO },
         auto_rotate: true,
         dragging: false,
         last_cursor: None,
