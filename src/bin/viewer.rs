@@ -377,7 +377,9 @@ impl Renderer {
                         m += skin.get(a.joints[i][k] as usize).copied().unwrap_or(Mat4::IDENTITY) * w;
                     }
                 }
-                let m = place * m;
+                // Weights are bytes summing to 254..256: normalise so the placement is not scaled.
+                let total: f32 = (0..4).map(|k| a.weights[i][k] as f32 / 255.0).sum();
+                let m = place * if total > 0.0 { m * (1.0 / total) } else { Mat4::IDENTITY };
                 let p = m.transform_point3(Vec3::from(a.rest_pos[i])) - Vec3::from(c);
                 let n = m.transform_vector3(Vec3::from(a.rest_nor[i])).normalize_or_zero();
                 Vertex { pos: to_view(p), normal: to_view(n), uv: a.uvs[i] }
@@ -403,6 +405,74 @@ impl Renderer {
                 Vertex { pos: to_view(p), normal: to_view(n), uv: mesh.uvs[i] }
             })
             .collect();
+        self.queue.write_buffer(&scene.vertices, (base * std::mem::size_of::<Vertex>()) as u64, bytemuck::cast_slice(&vertices));
+    }
+
+    /// Skin `mesh` with `clip` at `seconds` and write it at `base`, placed on the ground.
+    fn write_skinned(&self, base: usize, mesh: &mesh::Mesh, rig: &poe2_bundles::skeleton::Skeleton, clip: &Clip, seconds: f32, looped: bool, center: [f32; 3], pos: glam::Vec2, heading: f32) {
+        let Some(scene) = &self.scene else { return };
+        let frame = if looped { (seconds * clip.fps) % clip.length } else { (seconds * clip.fps).min(clip.length) };
+        let skin = rig.skin_matrices(&rig.pose(&clip.tracks, frame));
+        if std::env::var_os("POE2_DEBUG").is_some() {
+            for (i, m) in skin.iter().enumerate() {
+                let d = (*m - Mat4::IDENTITY).to_cols_array().iter().fold(0.0f32, |a, v| a.max(v.abs()));
+                if d > 0.01 || !d.is_finite() {
+                    eprintln!("bone {i} {} skin deviates {d}", rig.bones[i].name);
+                }
+            }
+        }
+        if std::env::var_os("POE2_DEBUG").is_some() {
+            let bad = mesh.weights.iter().filter(|w| (w.iter().map(|&v| v as u32).sum::<u32>() as i32 - 255).abs() > 3).count();
+            eprintln!("skinned mesh: {} verts, {} joints, {} weights, {bad} with weight sum off", mesh.positions.len(), mesh.joints.len(), mesh.weights.len());
+        }
+        if std::env::var_os("POE2_DEBUG").is_some() {
+            let mut worst = (0.0f32, 0usize);
+            for i in 0..mesh.positions.len() {
+                let mut m = Mat4::ZERO;
+                for k in 0..4 {
+                    let w = mesh.weights[i][k] as f32 / 255.0;
+                    if w > 0.0 {
+                        m += skin.get(mesh.joints[i][k] as usize).copied().unwrap_or(Mat4::IDENTITY) * w;
+                    }
+                }
+                let d = (m.transform_point3(Vec3::from(mesh.positions[i])) - Vec3::from(mesh.positions[i])).length();
+                if d > worst.0 {
+                    worst = (d, i);
+                }
+            }
+            eprintln!("worst vertex {} moves {} joints {:?} weights {:?}", worst.1, worst.0, mesh.joints[worst.1], mesh.weights[worst.1]);
+        }
+        let place = Mat4::from_translation(Vec3::new(pos.x, pos.y, 0.0)) * Mat4::from_rotation_z(heading);
+        let to_view = |v: Vec3| [v.x, -v.z, v.y];
+        let vertices: Vec<Vertex> = (0..mesh.positions.len())
+            .map(|i| {
+                let mut m = Mat4::ZERO;
+                for k in 0..4 {
+                    let w = mesh.weights[i][k] as f32 / 255.0;
+                    if w > 0.0 {
+                        m += skin.get(mesh.joints[i][k] as usize).copied().unwrap_or(Mat4::IDENTITY) * w;
+                    }
+                }
+                // Weights are bytes summing to 254..256: normalise so the placement is not scaled.
+                let total: f32 = (0..4).map(|k| mesh.weights[i][k] as f32 / 255.0).sum();
+                let m = place * if total > 0.0 { m * (1.0 / total) } else { Mat4::IDENTITY };
+                let p = m.transform_point3(Vec3::from(mesh.positions[i])) - Vec3::from(center);
+                let n = m.transform_vector3(Vec3::from(mesh.normals[i])).normalize_or_zero();
+                Vertex { pos: to_view(p), normal: to_view(n), uv: mesh.uvs[i] }
+            })
+            .collect();
+        if std::env::var_os("POE2_DEBUG").is_some() {
+            let mut worst = 0.0f32;
+            let mut wn = 0.0f32;
+            for (i, v) in vertices.iter().enumerate() {
+                let p = place.transform_point3(Vec3::from(mesh.positions[i])) - Vec3::from(center);
+                let q = to_view(p);
+                worst = worst.max((0..3).map(|k| (q[k] - v.pos[k]).abs()).fold(0.0, f32::max));
+                let n = to_view(place.transform_vector3(Vec3::from(mesh.normals[i])).normalize_or_zero());
+                wn = wn.max((0..3).map(|k| (n[k] - v.normal[k]).abs()).fold(0.0, f32::max));
+            }
+            eprintln!("skinned vs static: pos diff {worst}, normal diff {wn}");
+        }
         self.queue.write_buffer(&scene.vertices, (base * std::mem::size_of::<Vertex>()) as u64, bytemuck::cast_slice(&vertices));
     }
 
@@ -733,6 +803,11 @@ struct Enemy {
     hp: i32,
     max_hp: i32,
     name: String,
+    /// Idle, run, attack and death clips of the monster's own rig (empty when it has none).
+    clips: Vec<Clip>,
+    rig: Option<std::sync::Arc<poe2_bundles::skeleton::Skeleton>>,
+    state: usize,
+    state_time: f32,
 }
 
 const ENEMY_HP: i32 = 100;
@@ -771,9 +846,6 @@ impl Play {
                         e.hp -= HIT_DAMAGE;
                         eprintln!("hit: enemy hp {}", e.hp);
                         self.status = if e.hp > 0 { format!("{} hp {}/{}", e.name, e.hp, e.max_hp) } else { format!("{} slain", e.name) };
-                        if e.hp <= 0 {
-                            renderer.write_static(e.base, &e.mesh, self.center, e.pos, e.heading, false);
-                        }
                     } else {
                         self.status = "missed".into();
                     }
@@ -830,14 +902,18 @@ impl Play {
         let place = Mat4::from_translation(Vec3::new(self.pos.x, self.pos.y, 0.0)) * Mat4::from_rotation_z(self.heading);
         let _ = clock;
         renderer.animate(self.clip_time, place);
-        if let Some(e) = self.enemy.as_mut().filter(|e| e.hp > 0) {
+        if let Some(e) = self.enemy.as_mut() {
             // Face the player.
             let to = self.pos - e.pos;
-            e.heading = to.x.atan2(-to.y);
             let dist = to.length();
-            if self.player_hp > 0 {
+            let mut moving = false;
+            if e.hp > 0 {
+                e.heading = to.x.atan2(-to.y);
+            }
+            if e.hp > 0 && self.player_hp > 0 {
                 if dist < AGGRO && dist > STRIKE_RANGE * 0.8 {
                     e.pos += to / dist * ENEMY_SPEED * dt;
+                    moving = true;
                 }
                 self.enemy_cooldown = (self.enemy_cooldown - dt).max(0.0);
                 if dist <= STRIKE_RANGE && self.enemy_cooldown == 0.0 {
@@ -847,7 +923,26 @@ impl Play {
                     self.status = if self.player_hp > 0 { format!("you: {}/{PLAYER_HP} hp", self.player_hp) } else { "you died".into() };
                 }
             }
-            renderer.write_static(e.base, &e.mesh, self.center, e.pos, e.heading, true);
+            let want = if e.hp <= 0 {
+                3
+            } else if self.enemy_cooldown > ENEMY_STRIKE_INTERVAL - 0.8 {
+                2
+            } else if moving {
+                1
+            } else {
+                0
+            };
+            let want = std::env::var("POE2_MON_STATE").ok().and_then(|v| v.parse().ok()).unwrap_or(want);
+            if want != e.state {
+                e.state = want;
+                e.state_time = 0.0;
+            }
+            e.state_time += dt;
+            let rest = Clip { tracks: Vec::new(), fps: 30.0, length: 1.0 };
+            match if std::env::var_os("POE2_MON_REST").is_some() { Some(&rest) } else { e.clips.get(e.state).or(e.clips.first()) } {
+                Some(clip) if e.rig.is_some() && std::env::var_os("POE2_MON_STATIC").is_none() => renderer.write_skinned(e.base, &e.mesh, e.rig.as_ref().unwrap(), clip, e.state_time, e.state < 2, self.center, e.pos, e.heading),
+                _ => renderer.write_static(e.base, &e.mesh, self.center, e.pos, e.heading, e.hp > 0),
+            }
         }
         let c = self.center;
         cam.target = Vec3::new(self.pos.x - c[0], c[2] + 90.0, self.pos.y - c[1]);
@@ -918,7 +1013,25 @@ fn show_play(
         // Name and life scale come from MonsterVarieties when a dat schema is available.
         let stats = std::env::var_os("POE2_SCHEMA").and_then(|sd| poe2_bundles::monster::find(idx, dir, std::path::Path::new(&sd), &monster_path).ok());
         let (name, max_hp) = stats.map_or_else(|| ("training monster".to_string(), ENEMY_HP), |st| (st.name, (ENEMY_HP as i64 * st.life_multiplier / 100) as i32));
-        Enemy { mesh: m, base, name, max_hp, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), heading: 0.0, hp: max_hp }
+        // The monster's own animation file sits beside its art: .../monsters/<family>/<name>/rig.ast.
+        let rig = monster_path
+            .strip_prefix("metadata/monsters/")
+            .and_then(|r| r.rsplit_once('/'))
+            .and_then(|(d, _)| idx.read_file(dir, &format!("art/models/monsters/{d}/rig.ast")).ok())
+            .and_then(|b| poe2_bundles::skeleton::Skeleton::parse(&b).ok())
+            .map(std::sync::Arc::new);
+        let clips = rig.as_ref().map(|rig| {
+            let pick = |names: &[&str]| -> Option<Clip> {
+                let a = names.iter().find_map(|n| rig.animations.iter().find(|a| a.name.eq_ignore_ascii_case(n)))?;
+                let tracks = rig.tracks(a).ok()?;
+                let length = tracks.iter().flat_map(|t| t.rotations.iter().map(|k| k[0])).fold(1.0f32, f32::max);
+                Some(Clip { tracks, fps: a.framerate as f32, length })
+            };
+            let list = [pick(&["idle_01", "idle"]), pick(&["run_01", "walk_01", "run"]), pick(&["attack_01"]), pick(&["death_01"])];
+            eprintln!("monster clips (idle, run, attack, death): {:?}", list.iter().map(|c| c.is_some()).collect::<Vec<_>>());
+            list.into_iter().map(|c| c.unwrap_or(Clip { tracks: Vec::new(), fps: 30.0, length: 1.0 })).collect::<Vec<_>>()
+        }).unwrap_or_default();
+        Enemy { mesh: m, base, name, max_hp, clips, rig, state: 0, state_time: 0.0, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)), heading: 0.0, hp: max_hp }
     });
     poe2_bundles::room::recompute_bbox(&mut all);
     let center = mesh_center(&all);
