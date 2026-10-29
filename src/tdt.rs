@@ -14,7 +14,7 @@ pub struct Tdt {
     pub tgt: String,
     pub w: usize,
     pub h: usize,
-    /// Edge types in the order of the file (assumed N, W, S, E).
+    /// Edge types in file order: N, E, S, W (measured with the `edgeorder` tool: the east edge of a slot equals the west edge of its right neighbour).
     pub edges: [Option<String>; 4],
     pub grounds: [Option<String>; 4],
 }
