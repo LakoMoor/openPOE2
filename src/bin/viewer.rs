@@ -792,6 +792,8 @@ struct Play {
     /// Damage range of an unarmed hit and the number of swings so far (the roll cycles through the range).
     hit_range: (i32, i32),
     swings: u32,
+    /// Seconds one swing takes (Characters.WeaponSpeed); the attack clip is played at the matching speed.
+    swing_secs: Option<f32>,
     /// Seconds until the monster can strike again.
     enemy_cooldown: f32,
     /// Text for the window title.
@@ -835,7 +837,7 @@ impl Play {
         // Attacks root the character until the clip ends.
         let attack_len = renderer.anim.as_ref().and_then(|an| an.clips.get(2)).map(|c| c.length / c.fps);
         if let Some(t) = self.attack.as_mut() {
-            *t += dt;
+            *t += dt * attack_len.zip(self.swing_secs).map_or(1.0, |(l, w)| l / w);
             if attack_len.is_none_or(|l| *t >= l) {
                 self.attack = None;
             }
@@ -1094,11 +1096,11 @@ fn show_play(
     // Starting life and unarmed damage of the class come from the Characters table.
     let pstats = std::env::var_os("POE2_SCHEMA")
         .and_then(|sd| poe2_bundles::monster::player_stats(idx, dir, std::path::Path::new(&sd), character).ok())
-        .map_or((PLAYER_HP, (HIT_DAMAGE, HIT_DAMAGE)), |p| {
+        .map_or((PLAYER_HP, (HIT_DAMAGE, HIT_DAMAGE), None), |p| {
             eprintln!("player: life {} damage {}-{}", p.life, p.min_damage, p.max_damage);
-            (p.life as i32, (p.min_damage as i32, p.max_damage.max(p.min_damage) as i32))
+            (p.life as i32, (p.min_damage as i32, p.max_damage.max(p.min_damage) as i32), (p.attack_ms > 0).then(|| p.attack_ms as f32 / 1000.0))
         });
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, enemy_cooldown: 0.0, status: String::new() })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, enemy_cooldown: 0.0, status: String::new() })
 }
 
 impl ApplicationHandler for App {
