@@ -18,6 +18,8 @@ Offline Rust reimplementation of Path of Exile 2 that reads the user's own insta
 
 - Item 6 check: `data/balance` has no drop-pool / loot-table files (only `DropEffects`, `ChanceableItemClasses`, treasure-hunter and auto-loot-pet tables), so item drop chances are not in the client data: loot rules live on the server.
 
+- Item 6 approximation: every third kill equips the next weapon of the Tab list (invented rule, labelled "loot (invented rule)" in the status); verified in a 30 s headless run: kills at levels 1-3 gave the Changeling Talisman.
+
 ## Next, in order
 1. Camera constants from the client (Ghidra), replacing the estimates.
 2. `.tdt` grids: meaning of the 23x23 node grid and the tile-wide grid; connect heights and walkability to play mode.

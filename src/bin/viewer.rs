@@ -839,6 +839,7 @@ struct Play {
     /// Base (life, damage) of a monster by level from DefaultMonsterStats, and the kills so far.
     level_table: Vec<(i64, f64)>,
     kills: usize,
+    kill_count: usize,
     /// Weapons Tab cycles through, and the one in hand.
     weapons: Vec<poe2_bundles::monster::Weapon>,
     /// 0 is the class start weapon, 1.. index `weapons`.
@@ -937,6 +938,7 @@ impl Play {
                 let fwd = glam::Vec2::new(self.heading.sin(), -self.heading.cos());
                 let pos = self.pos;
                 let any = !self.enemies.is_empty();
+                let mut drop_roll = false;
                 let target = self
                     .enemies
                     .iter_mut()
@@ -950,9 +952,22 @@ impl Play {
                         e.hp -= lo + ((self.swings * 7) % (hi - lo + 1) as u32) as i32;
                         eprintln!("hit: enemy hp {}", e.hp);
                         self.status = if e.hp > 0 { format!("{} hp {}/{}", e.name, e.hp, e.max_hp) } else { format!("{} slain", e.name) };
+                        if e.hp <= 0 {
+                            drop_roll = true;
+                        }
                     }
                     None if any => self.status = "missed".into(),
                     None => {}
+                }
+                // Loot is server-side in the real game (no drop tables in the client data): every
+                // third kill hands out the next weapon of the list, an invented rule.
+                if drop_roll {
+                    self.kill_count += 1;
+                    if self.kill_count % 3 == 0 && !self.weapons.is_empty() {
+                        self.next_weapon();
+                        self.status = format!("loot (invented rule): {}", self.status);
+                        eprintln!("{}", self.status);
+                    }
                 }
             }
             None => self.hit_done = false,
@@ -1306,7 +1321,7 @@ fn show_play(
     let level_table: Vec<(i64, f64)> = std::env::var_os("POE2_SCHEMA")
         .map(|sd| (1..=20).filter_map(|l| poe2_bundles::monster::level_stats(idx, dir, std::path::Path::new(&sd), l).ok()).collect())
         .unwrap_or_default();
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemies, hit_done: false, walkable, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, weapons, weapon_ix: 0, held_ranges, start_hit: pstats.1, start_swing: pstats.2, status: String::new() })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemies, hit_done: false, walkable, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, kill_count: 0, weapons, weapon_ix: 0, held_ranges, start_hit: pstats.1, start_swing: pstats.2, status: String::new() })
 }
 
 impl ApplicationHandler for App {
