@@ -76,7 +76,7 @@ pub fn level_stats(idx: &Index, dir: &Path, schema_dir: &Path, level: usize) -> 
 }
 
 /// Starting values of a player class from the `Characters` table.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PlayerStats {
     pub life: i64,
     pub min_damage: i64,
@@ -85,6 +85,8 @@ pub struct PlayerStats {
     pub attack_ms: i64,
     /// Cast time in ms of the class's start skill (the dodge roll), via GrantedEffectsPerLevel -> GrantedEffects.
     pub roll_ms: i64,
+    /// Name of the starting weapon, when its `WeaponTypes` row was found (its damage and speed replace the unarmed ones).
+    pub weapon: Option<String>,
 }
 
 /// Find the class whose Id is a prefix of the character's `.ao` file name (e.g. `strfourb` -> `StrFour`).
@@ -97,13 +99,15 @@ pub fn player_stats(idx: &Index, dir: &Path, schema_dir: &Path, ao_path: &str) -
     let stem = want.rsplit('/').next().unwrap_or(&want).trim_end_matches(".ao").to_string();
     let mut best: Option<(usize, PlayerStats)> = None;
     let mut roll_ref: Option<Value> = None;
+    let mut weapon_ref: Option<Value> = None;
     for i in 0..table.rows {
         let row = table.decode_row(ts, i)?;
         let get = |n: &str| row.iter().find_map(|(k, v)| match v { Value::Int(x) if k == n => Some(*x), _ => None }).unwrap_or(0);
         let id = row.iter().find_map(|(k, v)| match v { Value::Str(s) if k == "Id" => Some(s.to_ascii_lowercase()), _ => None }).unwrap_or_default();
         let name = id.rsplit('/').next().unwrap_or("").to_string();
         if !name.is_empty() && stem.starts_with(&name) && best.as_ref().is_none_or(|(l, _)| name.len() > *l) {
-            best = Some((name.len(), PlayerStats { life: get("BaseMaxLife"), min_damage: get("MinDamage"), max_damage: get("MaxDamage"), attack_ms: get("WeaponSpeed"), roll_ms: 0 }));
+            best = Some((name.len(), PlayerStats { life: get("BaseMaxLife"), min_damage: get("MinDamage"), max_damage: get("MaxDamage"), attack_ms: get("WeaponSpeed"), roll_ms: 0, weapon: None }));
+            weapon_ref = row.iter().find_map(|(k, v)| match v { Value::List(l) if k == "StartWeapons" => l.first().cloned(), _ => None });
             roll_ref = row.iter().find_map(|(k, v)| match v { Value::List(l) if k == "StartingSkill" => l.first().cloned(), _ => None });
         }
     }
@@ -119,6 +123,26 @@ pub fn player_stats(idx: &Index, dir: &Path, schema_dir: &Path, ao_path: &str) -
             if let Some(Value::Ref(Some(e))) = prow.iter().find(|(k, _)| k == "GrantedEffect").map(|(_, v)| v.clone()) {
                 let erow = eff.decode_row(ets, e as usize)?;
                 stats.roll_ms = erow.iter().find_map(|(k, v)| match v { Value::Int(x) if k == "CastTime" => Some(*x), _ => None }).unwrap_or(0);
+            }
+        }
+    }
+    // The starting weapon: BaseItemTypes row -> WeaponTypes row (damage, speed). Its name is read from
+    // BaseItemTypes with the raw layout, because that table's schema does not match this build.
+    if let Some(Value::Ref(Some(item))) = weapon_ref {
+        let wt_bytes = idx.read_file(dir, "data/balance/weapontypes.datc64")?;
+        let wt = Table::parse(&wt_bytes)?;
+        if let Some(wts) = schema.table("weapontypes") {
+            for i in 0..wt.rows {
+                let row = wt.decode_row(wts, i)?;
+                let get = |n: &str| row.iter().find_map(|(k, v)| match v { Value::Int(x) if k == n => Some(*x), _ => None });
+                let is_item = row.iter().any(|(k, v)| k == "BaseItemType" && matches!(v, Value::Ref(Some(r)) if *r == item));
+                if is_item {
+                    stats.min_damage = get("DamageMin").unwrap_or(stats.min_damage);
+                    stats.max_damage = get("DamageMax").unwrap_or(stats.max_damage);
+                    stats.attack_ms = get("Speed").unwrap_or(stats.attack_ms);
+                    stats.weapon = Some(format!("base item {item}"));
+                    break;
+                }
             }
         }
     }

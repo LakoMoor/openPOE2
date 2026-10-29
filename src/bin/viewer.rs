@@ -1135,7 +1135,7 @@ fn show_play(
     let pstats = std::env::var_os("POE2_SCHEMA")
         .and_then(|sd| poe2_bundles::monster::player_stats(idx, dir, std::path::Path::new(&sd), character).ok())
         .map_or((PLAYER_HP, (HIT_DAMAGE, HIT_DAMAGE), None, 0.75), |p| {
-            eprintln!("player: life {} damage {}-{} swing {} ms roll {} ms", p.life, p.min_damage, p.max_damage, p.attack_ms, p.roll_ms);
+            eprintln!("player: life {} damage {}-{} swing {} ms roll {} ms weapon {:?}", p.life, p.min_damage, p.max_damage, p.attack_ms, p.roll_ms, p.weapon);
             (p.life as i32, (p.min_damage as i32, p.max_damage.max(p.min_damage) as i32), (p.attack_ms > 0).then(|| p.attack_ms as f32 / 1000.0), if p.roll_ms > 0 { p.roll_ms as f32 / 1000.0 } else { 0.75 })
         });
     Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemy, hit_done: false, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, enemy_cooldown: 0.0, status: String::new() })

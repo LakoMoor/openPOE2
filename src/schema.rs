@@ -108,7 +108,11 @@ impl Schema {
         let core = std::fs::read_to_string(root.join("poe2").join("_Core.gql"))
             .context("reading poe2/_Core.gql")?;
         let mut schema = Self::parse(&core, extra)?;
-        schema.apply_overrides(OVERRIDES)?;
+        // POE2_OVERRIDES=<file> replaces the built-in fixes (for trying layouts without rebuilding).
+        match std::env::var_os("POE2_OVERRIDES") {
+            Some(f) => schema.apply_overrides(&std::fs::read_to_string(f)?)?,
+            None => schema.apply_overrides(OVERRIDES)?,
+        }
         Ok(schema)
     }
 
