@@ -25,3 +25,13 @@ WeaponImpactSoundData insert 0 12
 # Columns after IdentifyMagic_AchievementItems do not match this build; keep the verified first 217 bytes and skip the rest (143 bytes).
 BaseItemTypes drop 21 22 23 24 25 26 27 28 29 30 31 32 33
 BaseItemTypes insert 21 143
+# Mods: every StatNValue is an interval (min, max) in this build, and Stat8Min/MaxHardmode are gone.
+Mods drop 61 62
+Mods insert 44 4
+Mods insert 41 4
+Mods insert 33 4
+Mods insert 26 4
+Mods insert 16 4
+Mods insert 15 4
+Mods insert 14 4
+Mods insert 13 4

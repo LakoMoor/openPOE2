@@ -24,7 +24,7 @@ Play mode (Shift = dodge roll, the class start skill; its 750 ms comes from Gran
 ## What works
 
 - `Bundles2` reader: Oodle (Leviathan) decompression via the pure-Rust `oozextract`, index with ~4.27 M files.
-- `.datc64` table reader with schema validation. 550 of 568 tables with a community schema decode fully.
+- `.datc64` table reader with schema validation. 551 of 568 tables with a community schema decode fully.
 - `dds2png` / `icongrid`: texture decoding (BC-compressed DDS) and icon sheets built from table columns.
 - `meshview` / `meshcheck`: mesh loading for `.fmt` (v4-9) and `.smd` (v1-3) models with a software preview renderer that applies `.mat` materials and base-colour textures. Format notes: [poe_data_tools](https://github.com/adamthedash/poe_data_tools) (MIT/Apache-2.0).
 - `viewer`: wgpu model viewer (drag to orbit, wheel to zoom, Space toggles rotation; `--screenshot out.png` renders offscreen). Pass `@filter` instead of a path to browse every matching model: Left/Right step, PageUp/PageDown jump by 10, Home/End. Skinned meshes get their materials from the companion `.sm`; a terrain tile (`.tgt`) is assembled from its `.tgm` sub-tiles; a room (`.arm`) is shown as a ground plane with its doodads (`.ao` -> mesh) placed on it; a character `.ao` (e.g. `metadata/characters/str/strfourb.ao`) is assembled in its rest pose from the skinned body, outfit pieces and bone/socket attachments (skeleton from `.ast`).
