@@ -14,8 +14,15 @@ fn main() -> Result<()> {
         hi = hi.max(p[2]);
     }
     if let Some(out) = a.get(3) {
-        let text: String = m.positions.iter().map(|p| format!("{} {} {}
-", p[0], p[1], p[2])).collect();
+        // Only the ground layer: decor would hide the terrain height.
+        let mut text = String::new();
+        for sh in m.shapes.iter().filter(|s| s.name == "ground") {
+            for &i in &m.indices[sh.first_index as usize..(sh.first_index + sh.index_count) as usize] {
+                let p = m.positions[i as usize];
+                text.push_str(&format!("{} {} {}
+", p[0], p[1], p[2]));
+            }
+        }
         std::fs::write(out, text)?;
     }
     println!("z {lo}..{hi}, {} vertices", m.positions.len());
