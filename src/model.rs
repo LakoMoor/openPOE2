@@ -80,6 +80,9 @@ pub fn load_mesh(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
     if path.ends_with(".arm") {
         return load_room(idx, dir, path);
     }
+    if path.ends_with(".tgr") {
+        return load_zone(idx, dir, path);
+    }
     if !path.ends_with(".tgt") {
         return crate::mesh::parse(path, &idx.read_file(dir, path)?);
     }
@@ -195,6 +198,91 @@ fn pick_tile<'a>(tiles: &'a [crate::tdt::Tdt], slot: &crate::room::KSlot) -> Opt
         }
     }
     best.map(|(_, t, r)| (t, r))
+}
+
+/// A zone preview from a `.tgr` graph: rooms are placed at the graph's nodes (positions are in
+/// cells, 23 per sub-tile) and corridors of ground join linked nodes. This is not the
+/// game's generator: it does not pick tiles, fill the gaps or choose among room variants.
+fn load_zone(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
+    use crate::room;
+    let read = |p: &str| -> String {
+        let b = idx.read_file(dir, p).unwrap_or_default();
+        let b = b.strip_prefix(&[0xff, 0xfe]).unwrap_or(&b);
+        String::from_utf16_lossy(&b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>())
+    };
+    let text = read(path);
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let mut master = String::new();
+    let mut count = 0usize;
+    while let Some(l) = lines.next() {
+        if let Some(r) = l.strip_prefix("MasterFile:") {
+            master = r.trim().trim_matches('"').to_string();
+        } else if let Some(r) = l.strip_prefix("Nodes:") {
+            count = r.trim().parse().unwrap_or(0);
+            break;
+        }
+    }
+    let area = master.rsplit_once('/').map_or("", |(a, _)| a).to_string();
+    let rooms: Vec<String> = read(&format!("{area}/room_nodes.rs"))
+        .lines()
+        .filter_map(|l| l.split('"').nth(1).filter(|p| p.to_ascii_lowercase().ends_with(".arm")).map(str::to_string))
+        .collect();
+    // Skip the three header strings, then read the nodes.
+    let mut nodes: Vec<(f32, f32, Vec<usize>, String)> = Vec::new();
+    for l in lines.by_ref().skip_while(|l| *l == "\"\"").take(count) {
+        let (head, rest) = l.split_once('"').map_or((l, ""), |(h, r)| (h, r));
+        let nums: Vec<f32> = head.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+        if nums.len() < 3 {
+            continue;
+        }
+        let links = nums[3..3 + (nums[2] as usize).min(nums.len() - 3)].iter().map(|&v| v as usize).collect();
+        nodes.push((nums[0], nums[1], links, rest.split('"').next().unwrap_or("").to_string()));
+    }
+    let mut out = Mesh::default();
+    let ground = AreaGround::load(idx, dir, &master);
+    let unit = room::CELL * room::CELLS_PER_SIDE as f32;
+    // Corridors: a strip two sub-tiles wide between linked nodes.
+    let mat = ground.by_name.get("").cloned().unwrap_or_default();
+    let first = out.indices.len() as u32;
+    for (i, (x, y, links, _)) in nodes.iter().enumerate() {
+        for &j in links.iter().filter(|&&j| j > i && j < nodes.len()) {
+            let (a, b) = ([x * room::CELL, y * room::CELL], [nodes[j].0 * room::CELL, nodes[j].1 * room::CELL]);
+            let d = [b[0] - a[0], b[1] - a[1]];
+            let len = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1.0);
+            let n = [-d[1] / len * unit, d[0] / len * unit];
+            let base = out.positions.len() as u32;
+            for p in [[a[0] - n[0], a[1] - n[1]], [a[0] + n[0], a[1] + n[1]], [b[0] + n[0], b[1] + n[1]], [b[0] - n[0], b[1] - n[1]]] {
+                out.positions.push([p[0], p[1], 0.0]);
+                out.normals.push([0.0, 0.0, -1.0]);
+                out.uvs.push([p[0] / unit, p[1] / unit]);
+            }
+            out.indices.extend([0, 1, 2, 0, 2, 3].map(|k| k + base));
+        }
+    }
+    if out.indices.len() as u32 > first {
+        out.shapes.push(crate::mesh::Shape { name: "corridor".into(), material: mat, first_index: first, index_count: out.indices.len() as u32 - first });
+    }
+    // Rooms: a node named like a room file takes the first such room.
+    let mut placed = 0;
+    for (x, y, _, name) in &nodes {
+        let key = name.to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        let Some(room_path) = rooms.iter().find(|r| {
+            let stem = r.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+            stem.starts_with(&key)
+        }) else {
+            continue;
+        };
+        let Ok(part) = load_room(idx, dir, &room_path.to_ascii_lowercase()) else { continue };
+        room::append_placed(&mut out, &part, 0.0, 1.0, [x * room::CELL, y * room::CELL, 0.0]);
+        out.obstacles.extend(part.obstacles.iter().map(|o| [o[0] + x * room::CELL, o[1] + y * room::CELL, o[2] + x * room::CELL, o[3] + y * room::CELL]));
+        placed += 1;
+    }
+    eprintln!("{path}: {} nodes, {placed} rooms placed", nodes.len());
+    room::recompute_bbox(&mut out);
+    Ok(out)
 }
 
 /// A room: a ground plane with its doodads placed on it.
