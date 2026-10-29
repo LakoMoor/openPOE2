@@ -307,7 +307,9 @@ fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
                 let mesh = tile_cache.entry(t.tgt.clone()).or_insert_with(|| load_mesh(idx, dir, &t.tgt.to_ascii_lowercase()).ok()).as_ref()?;
                 let b = mesh.bbox;
                 let (cx, cy) = ((b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0);
-                let sign = if std::env::var_os("POE2_ROT_NEG").is_some() { -1.0 } else { 1.0 };
+                // Edges run N, E, S, W (clockwise with y down), so matching tile edge i + r to slot edge i takes a
+                // turn of -r quarter turns. A weak fit of tile-ground offsets against edges agrees (N is -y).
+                let sign = if std::env::var_os("POE2_ROT_POS").is_some() { 1.0 } else { -1.0 };
                 let angle = sign * rot as f32 * std::f32::consts::FRAC_PI_2;
                 let (sn, cs) = angle.sin_cos();
                 let unit = room::CELL * room::CELLS_PER_SIDE as f32;
