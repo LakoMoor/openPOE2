@@ -17,6 +17,9 @@ fn main() {
                     }
                     std::fs::write(out, text).unwrap();
                 }
+                if std::env::var_os("SUB").is_some() {
+                    println!("{p}: subtile bytes {:?}", t.subtile_bytes);
+                }
                 if std::env::var_os("MAX").is_some() {
                     let m = t.nodes.iter().filter_map(|n| n.grid.as_ref()).flat_map(|g| (0..529).map(move |i| g.get(i))).max();
                     println!("{p}: max node height {m:?}");
