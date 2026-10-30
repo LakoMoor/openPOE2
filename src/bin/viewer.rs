@@ -1229,6 +1229,7 @@ fn show_play(
         if std::env::var_os("POE2_DEBUG").is_some() {
             let cell = 250.0 / 23.0;
             let (mut sum, mut n) = (0.0f32, 0u32);
+            let mut pairs: Vec<(usize, usize, f32)> = Vec::new();
             for a in &heights {
                 let (sn, cs) = a.angle.sin_cos();
                 let (hw, hh) = (a.width as f32 * cell / 2.0, a.height as f32 * cell / 2.0);
@@ -1239,13 +1240,28 @@ fn show_play(
                         if (nx == 0.0 && k >= a.width) || (ny == 0.0 && k >= a.height) { continue; }
                         let inside = world(lx - nx * cell * 0.5, ly - ny * cell * 0.5);
                         let outside = world(lx + nx * cell * 0.5, ly + ny * cell * 0.5);
-                        let (Some(zi), Some(zo)) = (a.sample(inside[0], inside[1], cell), heights.iter().filter(|b| !std::ptr::eq(*b, a)).find_map(|b| b.sample(outside[0], outside[1], cell))) else { continue };
+                        let Some(zi) = a.sample(inside[0], inside[1], cell) else { continue };
+                        let Some((bi, zo)) = heights.iter().enumerate().filter(|(_, b)| !std::ptr::eq(*b, a)).find_map(|(bi, b)| Some((bi, b.sample(outside[0], outside[1], cell)?))) else { continue };
                         sum += (zi - zo).abs();
                         n += 1;
+                        let ai = heights.iter().position(|h| std::ptr::eq(h, a)).unwrap();
+                        pairs.push((ai, bi, zi - zo));
                     }
                 }
             }
             eprintln!("terrain: seam mismatch {:.2} model units over {n} seam samples", sum / n.max(1) as f32);
+            // Fit one constant offset per tile (median of seam differences, iterated) and report what is left.
+            let mut off = vec![0.0f32; heights.len()];
+            for _ in 0..50 {
+                for t in 0..heights.len() {
+                    let mut d: Vec<f32> = pairs.iter().filter_map(|&(a, b, e)| if a == t { Some(off[b] - e) } else if b == t { Some(off[a] + e) } else { None }).collect();
+                    if d.is_empty() { continue; }
+                    d.sort_by(|x, y| x.total_cmp(y));
+                    off[t] = d[d.len() / 2];
+                }
+            }
+            let resid: f32 = pairs.iter().map(|&(a, b, e)| (e - (off[a] - off[b])).abs()).sum::<f32>() / pairs.len().max(1) as f32;
+            eprintln!("terrain: seam mismatch after a fitted offset per tile {resid:.2}");
         }
         let (lo, hi) = steps.fold((u8::MAX, 0u8), |(lo, hi), s| (lo.min(s), hi.max(s)));
         eprintln!("terrain: {} height patches, steps {lo}..{hi} (HEIGHT_STEP {} is a fitted estimate)", heights.len(), poe2_bundles::tdt::HEIGHT_STEP);
