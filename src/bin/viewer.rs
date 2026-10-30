@@ -397,9 +397,9 @@ impl Renderer {
 
     /// Write a static mesh into the vertex buffer at `base`, at `pos` on the ground facing
     /// `heading`; `alive == false` collapses it to nothing.
-    fn write_static(&self, base: usize, mesh: &mesh::Mesh, center: [f32; 3], pos: glam::Vec2, heading: f32, alive: bool) {
+    fn write_static(&self, base: usize, mesh: &mesh::Mesh, center: [f32; 3], pos: glam::Vec2, z: f32, heading: f32, alive: bool) {
         let Some(scene) = &self.scene else { return };
-        let place = Mat4::from_translation(Vec3::new(pos.x, pos.y, 0.0)) * Mat4::from_rotation_z(heading);
+        let place = Mat4::from_translation(Vec3::new(pos.x, pos.y, -z)) * Mat4::from_rotation_z(heading);
         let to_view = |v: Vec3| [v.x, -v.z, v.y];
         let vertices: Vec<Vertex> = (0..mesh.positions.len())
             .map(|i| {
@@ -415,7 +415,7 @@ impl Renderer {
     }
 
     /// Skin `mesh` with `clip` at `seconds` and write it at `base`, placed on the ground.
-    fn write_skinned(&self, base: usize, mesh: &mesh::Mesh, rig: &poe2_bundles::skeleton::Skeleton, clip: &Clip, seconds: f32, looped: bool, center: [f32; 3], pos: glam::Vec2, heading: f32) {
+    fn write_skinned(&self, base: usize, mesh: &mesh::Mesh, rig: &poe2_bundles::skeleton::Skeleton, clip: &Clip, seconds: f32, looped: bool, center: [f32; 3], pos: glam::Vec2, z: f32, heading: f32) {
         let Some(scene) = &self.scene else { return };
         let frame = if looped { (seconds * clip.fps) % clip.length } else { (seconds * clip.fps).min(clip.length) };
         let skin = rig.skin_matrices(&rig.pose(&clip.tracks, frame));
@@ -448,7 +448,7 @@ impl Renderer {
             }
             eprintln!("worst vertex {} moves {} joints {:?} weights {:?}", worst.1, worst.0, mesh.joints[worst.1], mesh.weights[worst.1]);
         }
-        let place = Mat4::from_translation(Vec3::new(pos.x, pos.y, 0.0)) * Mat4::from_rotation_z(heading);
+        let place = Mat4::from_translation(Vec3::new(pos.x, pos.y, -z)) * Mat4::from_rotation_z(heading);
         let to_view = |v: Vec3| [v.x, -v.z, v.y];
         let vertices: Vec<Vertex> = (0..mesh.positions.len())
             .map(|i| {
@@ -816,6 +816,8 @@ struct Play {
     clip: usize,
     /// Ground footprints the character cannot enter.
     obstacles: Vec<[f32; 4]>,
+    heights: Vec<mesh::HeightPatch>,
+    base_z: f32,
     /// Ground triangles (x, y) of a zone graph: the player cannot leave them. Empty for rooms.
     walkable: Vec<[glam::Vec2; 3]>,
     enemies: Vec<Enemy>,
@@ -894,6 +896,14 @@ const ROLL_DISTANCE: f32 = 450.0;
 
 impl Play {
     /// Whether `p` lies on a ground triangle of the zone.
+    /// Terrain height under `p` relative to the start (0 where no height data; POE2_FLAT disables).
+    fn ground_z(&self, p: glam::Vec2) -> f32 {
+        if self.base_z.is_nan() {
+            return 0.0;
+        }
+        self.heights.iter().find_map(|h| h.sample(p.x, p.y, 250.0 / 23.0)).map_or(0.0, |z| z - self.base_z)
+    }
+
     fn on_ground(&self, p: glam::Vec2) -> bool {
         self.walkable.iter().any(|t| {
             let side = |a: glam::Vec2, b: glam::Vec2| (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
@@ -1040,7 +1050,7 @@ impl Play {
             }
         }
         self.clip_time += dt;
-        let place = Mat4::from_translation(Vec3::new(self.pos.x, self.pos.y, 0.0)) * Mat4::from_rotation_z(self.heading);
+        let place = Mat4::from_translation(Vec3::new(self.pos.x, self.pos.y, -self.ground_z(self.pos))) * Mat4::from_rotation_z(self.heading);
         let _ = clock;
         renderer.animate(self.clip_time, place);
         let mut enemies = std::mem::take(&mut self.enemies);
@@ -1096,8 +1106,8 @@ impl Play {
             e.state_time += dt;
             let rest = Clip { tracks: Vec::new(), fps: 30.0, length: 1.0 };
             match if std::env::var_os("POE2_MON_REST").is_some() { Some(&rest) } else { e.clips.get(e.state).or(e.clips.first()) } {
-                Some(clip) if e.rig.is_some() && std::env::var_os("POE2_MON_STATIC").is_none() => renderer.write_skinned(e.base, &e.mesh, e.rig.as_ref().unwrap(), clip, e.state_time, e.state < 2, self.center, e.pos, e.heading),
-                _ => renderer.write_static(e.base, &e.mesh, self.center, e.pos, e.heading, e.hp > 0),
+                Some(clip) if e.rig.is_some() && std::env::var_os("POE2_MON_STATIC").is_none() => renderer.write_skinned(e.base, &e.mesh, e.rig.as_ref().unwrap(), clip, e.state_time, e.state < 2, self.center, e.pos, self.ground_z(e.pos), e.heading),
+                _ => renderer.write_static(e.base, &e.mesh, self.center, e.pos, self.ground_z(e.pos), e.heading, e.hp > 0),
             }
         }
         self.enemies = enemies;
@@ -1203,6 +1213,20 @@ fn show_play(
     let base = world_mesh.positions.len();
 
     let obstacles = world_mesh.obstacles.clone();
+    let heights = world_mesh.heights.clone();
+    {
+        let steps = heights.iter().flat_map(|h| h.field.iter().flatten().copied());
+        if std::env::var_os("POE2_DEBUG").is_some() {
+            let mut hist = [0usize; 256];
+            for v in heights.iter().flat_map(|h| h.field.iter().flatten()) { hist[*v as usize] += 1; }
+            let mut top: Vec<_> = hist.iter().enumerate().filter(|(_, c)| **c > 0).map(|(i, c)| (*c, i)).collect();
+            top.sort_by(|a, b| b.cmp(a));
+            eprintln!("terrain: most common steps (count, step) {:?}", &top[..top.len().min(8)]);
+        }
+        let (lo, hi) = steps.fold((u8::MAX, 0u8), |(lo, hi), s| (lo.min(s), hi.max(s)));
+        eprintln!("terrain: {} height patches, steps {lo}..{hi} (HEIGHT_STEP {} is a fitted estimate)", heights.len(), poe2_bundles::tdt::HEIGHT_STEP);
+    }
+    let base_z = if std::env::var_os("POE2_FLAT").is_some() { f32::NAN } else { heights.iter().find_map(|h| h.sample(start.x, start.y, 250.0 / 23.0)).unwrap_or(0.0) };
     let walkable: Vec<[glam::Vec2; 3]> = if world.ends_with(".tgr") {
         let v = |i: u32| glam::Vec2::new(world_mesh.positions[i as usize][0], world_mesh.positions[i as usize][1]);
         world_mesh.indices.chunks_exact(3).map(|t| [v(t[0]), v(t[1]), v(t[2])]).collect()
@@ -1321,7 +1345,8 @@ fn show_play(
     let level_table: Vec<(i64, f64)> = std::env::var_os("POE2_SCHEMA")
         .map(|sd| (1..=20).filter_map(|l| poe2_bundles::monster::level_stats(idx, dir, std::path::Path::new(&sd), l).ok()).collect())
         .unwrap_or_default();
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, enemies, hit_done: false, walkable, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, kill_count: 0, weapons, weapon_ix: 0, held_ranges, start_hit: pstats.1, start_swing: pstats.2, status: String::new() })
+    eprintln!("terrain: height under start {:.1}, base {:.1}", heights.iter().find_map(|h| h.sample(start.x, start.y, 250.0 / 23.0)).unwrap_or(f32::NAN), base_z);
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, heights, base_z, enemies, hit_done: false, walkable, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, kill_count: 0, weapons, weapon_ix: 0, held_ranges, start_hit: pstats.1, start_swing: pstats.2, status: String::new() })
 }
 
 impl ApplicationHandler for App {

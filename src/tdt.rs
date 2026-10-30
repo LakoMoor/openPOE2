@@ -12,6 +12,8 @@ use anyhow::{ensure, Context, Result};
 pub struct Tdt {
     pub version: u32,
     pub tgt: String,
+    /// Bundle path of the `.tdt` itself (filled by the loader, empty from `parse`).
+    pub path: String,
     pub w: usize,
     pub h: usize,
     /// Edge types in file order: N, E, S, W (measured with the `edgeorder` tool: the east edge of a slot equals the west edge of its right neighbour).
@@ -46,6 +48,7 @@ pub fn parse(b: &[u8]) -> Result<Tdt> {
     Ok(Tdt {
         version,
         tgt: string_at(0).unwrap_or_default(),
+        path: String::new(),
         w: *b.get(p + 28).context("truncated tdt")? as usize,
         h: *b.get(p + 29).context("truncated tdt")? as usize,
         edges,

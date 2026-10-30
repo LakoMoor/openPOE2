@@ -170,7 +170,12 @@ fn area_tiles(idx: &Index, dir: &Path, room_path: &str) -> Vec<crate::tdt::Tdt> 
         return text(&list)
             .lines()
             .filter_map(|l| l.split('"').nth(1).filter(|p| p.to_ascii_lowercase().ends_with(".tdt")).map(str::to_string))
-            .filter_map(|p| crate::tdt::parse(&idx.read_file(dir, &p.to_ascii_lowercase()).ok()?).ok())
+            .filter_map(|p| {
+                let p = p.to_ascii_lowercase();
+                let mut t = crate::tdt::parse(&idx.read_file(dir, &p).ok()?).ok()?;
+                t.path = p;
+                Some(t)
+            })
             .collect();
     }
     Vec::new()
@@ -277,6 +282,7 @@ fn load_zone(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
         };
         let Ok(part) = load_room(idx, dir, &room_path.to_ascii_lowercase()) else { continue };
         room::append_placed(&mut out, &part, 0.0, 1.0, [x * room::CELL, y * room::CELL, 0.0]);
+        out.heights.extend(part.heights.iter().map(|h| { let mut h = h.clone(); h.center[0] += x * room::CELL; h.center[1] += y * room::CELL; h }));
         out.obstacles.extend(part.obstacles.iter().map(|o| [o[0] + x * room::CELL, o[1] + y * room::CELL, o[2] + x * room::CELL, o[3] + y * room::CELL]));
         placed += 1;
     }
@@ -335,6 +341,9 @@ fn load_room(idx: &Index, dir: &Path, path: &str) -> anyhow::Result<Mesh> {
                     eprintln!("tile {}: {} ground shapes, {} indices, material {:?}", t.tgt, g.len(), g.iter().map(|s| s.index_count).sum::<u32>(), g.first().map(|s| s.material.clone()));
                 }
                 room::append_placed(&mut out, &mesh, angle, 1.0, offset);
+                if let Some(full) = idx.read_file(dir, &t.path).ok().and_then(|b| crate::tdt::parse_full(&b).ok()) {
+                    out.heights.push(crate::mesh::HeightPatch { center: target, angle, width: t.w * 23, height: t.h * 23, field: full.height_field() });
+                }
                 Some(())
             });
             if placed.is_some() {

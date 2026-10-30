@@ -32,3 +32,5 @@ Offline Rust reimplementation of Path of Exile 2 that reads the user's own insta
 
 ## Out of scope
 Anything that needs a GGG server or modifies the official client.
+
+- Item 2 (heights in play mode): `.tdt` height fields are now kept per placed tile (`Mesh.heights`, `HeightPatch`), and the player and monsters are placed at `ground_z` (relative to the start; `POE2_FLAT=1` disables). Run on `gallows/act1/1_13/rooms/unique/exit_manor_01_nocrop.arm`: 28 height patches, steps 0..255 (most cells 0, 41, 64; the start lands on step 0). Not verified: that the figures follow terrain visually, HEIGHT_STEP (fitted), the grid origin at the slot centre, and the tile rotation sign. Most rooms in the data have no slots with a matching tile (0 patches there).
