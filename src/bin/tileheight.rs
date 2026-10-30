@@ -16,7 +16,8 @@ fn main() -> Result<()> {
     if let Some(out) = a.get(3) {
         // Only the ground layer: decor would hide the terrain height.
         let mut text = String::new();
-        for sh in m.shapes.iter().filter(|s| s.name == "ground") {
+        let all = a.get(4).is_some_and(|v| v == "all");
+        for sh in m.shapes.iter().filter(|s| all || s.name == "ground") {
             for &i in &m.indices[sh.first_index as usize..(sh.first_index + sh.index_count) as usize] {
                 let p = m.positions[i as usize];
                 text.push_str(&format!("{} {} {}

@@ -194,6 +194,31 @@ pub struct TdtFull {
     pub subtile_bytes: Vec<u8>,
 }
 
+/// Model-space height of one step of a node grid (fitted against four tiles' meshes, 6.8-7.8; not from the client).
+pub const HEIGHT_STEP: f32 = 7.5;
+
+impl TdtFull {
+    /// The per-cell height field of the whole tile, `w * 23` by `h * 23` steps, row-major, `None` where a
+    /// sub-tile has no node. Nodes are laid out row-major over the sub-tiles, one per sub-tile in order;
+    /// a tile with one node fewer than sub-tiles lacks the last. Higher steps are higher ground
+    /// (the model's up axis is -z, so mesh z = -HEIGHT_STEP * step + offset).
+    pub fn height_field(&self) -> Vec<Option<u8>> {
+        let (w, h) = (self.header.w as usize, self.header.h as usize);
+        let width = w * 23;
+        let mut out = vec![None; width * h * 23];
+        for (k, node) in self.nodes.iter().take(w * h).enumerate() {
+            let Some(g) = &node.grid else { continue };
+            let (sy, sx) = (k / w, k % w);
+            for y in 0..23 {
+                for x in 0..23 {
+                    out[(sy * 23 + y) * width + sx * 23 + x] = Some(g.get(y * 23 + x));
+                }
+            }
+        }
+        out
+    }
+}
+
 pub fn parse_full(b: &[u8]) -> Result<TdtFull> {
     let header = parse(b)?;
     let v = header.version;

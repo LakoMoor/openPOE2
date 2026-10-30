@@ -20,6 +20,8 @@ Offline Rust reimplementation of Path of Exile 2 that reads the user's own insta
 
 - Item 6 approximation: every third kill equips the next weapon of the Tab list (invented rule, labelled "loot (invented rule)" in the status); verified in a 30 s headless run: kills at levels 1-3 gave the Changeling Talisman.
 
+- Item 2 finding (2026-10-30): the per-sub-tile 23x23 node grids ARE a quantised height field, not hull/walkability data. Evidence: client strings `DecompressSubTileHullPlane()` (planes of 23 or 27 cells, decoded by `FUN_141d051c0`) pointed at the layout; adjacent nodes match along shared edges (node k's last row equals node k+3's first row in a 3x3 tile); assembling the nodes row-major per sub-tile (a tile with one node fewer than sub-tiles lacks the last) correlates 0.68-0.82 with the tile mesh's per-cell median z over four tiles, with slope -6.8..-7.8 model units per step (up is -z), so `tdt::HEIGHT_STEP` = 7.5 (estimate; correlation is limited because the mesh includes decor). `TdtFull::height_field()` assembles it. Not yet wired into play mode: the player still walks at z = 0.
+
 ## Next, in order
 1. Camera constants from the client (Ghidra), replacing the estimates.
 2. `.tdt` grids: meaning of the 23x23 node grid and the tile-wide grid; connect heights and walkability to play mode.
