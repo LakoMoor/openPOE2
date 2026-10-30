@@ -1226,6 +1226,27 @@ fn show_play(
             top.sort_by(|a, b| b.cmp(a));
             eprintln!("terrain: most common steps (count, step) {:?}", &top[..top.len().min(8)]);
         }
+        if std::env::var_os("POE2_DEBUG").is_some() {
+            let cell = 250.0 / 23.0;
+            let (mut sum, mut n) = (0.0f32, 0u32);
+            for a in &heights {
+                let (sn, cs) = a.angle.sin_cos();
+                let (hw, hh) = (a.width as f32 * cell / 2.0, a.height as f32 * cell / 2.0);
+                let world = |lx: f32, ly: f32| [a.center[0] + lx * cs - ly * sn, a.center[1] + lx * sn + ly * cs];
+                for k in 0..a.width.max(a.height) {
+                    let t = (k as f32 + 0.5) * cell;
+                    for (lx, ly, nx, ny) in [(t - hw, -hh, 0.0, -1.0), (t - hw, hh, 0.0, 1.0), (-hw, t - hh, -1.0, 0.0), (hw, t - hh, 1.0, 0.0f32)] {
+                        if (nx == 0.0 && k >= a.width) || (ny == 0.0 && k >= a.height) { continue; }
+                        let inside = world(lx - nx * cell * 0.5, ly - ny * cell * 0.5);
+                        let outside = world(lx + nx * cell * 0.5, ly + ny * cell * 0.5);
+                        let (Some(zi), Some(zo)) = (a.sample(inside[0], inside[1], cell), heights.iter().filter(|b| !std::ptr::eq(*b, a)).find_map(|b| b.sample(outside[0], outside[1], cell))) else { continue };
+                        sum += (zi - zo).abs();
+                        n += 1;
+                    }
+                }
+            }
+            eprintln!("terrain: seam mismatch {:.2} model units over {n} seam samples", sum / n.max(1) as f32);
+        }
         let (lo, hi) = steps.fold((u8::MAX, 0u8), |(lo, hi), s| (lo.min(s), hi.max(s)));
         eprintln!("terrain: {} height patches, steps {lo}..{hi} (HEIGHT_STEP {} is a fitted estimate)", heights.len(), poe2_bundles::tdt::HEIGHT_STEP);
     }
