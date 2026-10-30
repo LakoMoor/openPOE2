@@ -21,6 +21,8 @@ pub struct MonsterStats {
     pub min_attack_distance: i64,
     pub max_attack_distance: i64,
     pub aggro_range: i64,
+    /// Percent multiplier on the experience a kill gives (`ExperienceMultiplier`).
+    pub experience_multiplier: i64,
 }
 
 /// Find the variety whose Id or AO file list matches `ao_path` (an `.ao` path or a bare Id).
@@ -57,6 +59,7 @@ pub fn find(idx: &Index, dir: &Path, schema_dir: &Path, ao_path: &str) -> Result
                 min_attack_distance: int(&row, "MinimumAttackDistance"),
                 max_attack_distance: int(&row, "MaximumAttackDistance"),
                 aggro_range: int(&row, "MinAgroRange"),
+                experience_multiplier: int(&row, "ExperienceMultiplier"),
             });
         }
     }

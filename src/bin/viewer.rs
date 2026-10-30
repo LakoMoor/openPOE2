@@ -885,6 +885,7 @@ struct Enemy {
     cooldown: f32,
     /// MonsterVarieties life and damage multipliers (percent).
     mults: (i64, i64),
+    xp_mult: i64,
 }
 
 const ENEMY_HP: i32 = 100;
@@ -958,6 +959,7 @@ impl Play {
                 let pos = self.pos;
                 let any = !self.enemies.is_empty();
                 let mut drop_roll = false;
+                let mut xp_mult = 100;
                 let target = self
                     .enemies
                     .iter_mut()
@@ -973,6 +975,7 @@ impl Play {
                         self.status = if e.hp > 0 { format!("{} hp {}/{}", e.name, e.hp, e.max_hp) } else { format!("{} slain", e.name) };
                         if e.hp <= 0 {
                             drop_roll = true;
+                            xp_mult = e.xp_mult;
                         }
                     }
                     None if any => self.status = "missed".into(),
@@ -982,7 +985,8 @@ impl Play {
                 // third kill hands out the next weapon of the list, an invented rule.
                 if drop_roll {
                     self.kill_count += 1;
-                    if let Some(&gain) = self.monster_xp.get(self.kills.min(self.monster_xp.len().saturating_sub(1))) {
+                    if let Some(&base) = self.monster_xp.get(self.kills.min(self.monster_xp.len().saturating_sub(1))) {
+                        let gain = base * xp_mult / 100;
                         self.xp += gain;
                         eprintln!("xp: +{gain} (monster level {}), total {}", self.kills + 1, self.xp);
                         while self.xp_table.get(self.player_level).is_some_and(|&need| self.xp >= need) {
@@ -1324,6 +1328,7 @@ fn show_play(
         let level = std::env::var("POE2_MON_LEVEL").ok().and_then(|v| v.parse().ok()).unwrap_or(1usize);
         let lvl_stats = std::env::var_os("POE2_SCHEMA").and_then(|sd| poe2_bundles::monster::level_stats(idx, dir, std::path::Path::new(&sd), level).ok());
         let mults = stats.as_ref().map_or((100, 100), |s| (s.life_multiplier, s.damage_multiplier));
+        let xp_mult = stats.as_ref().map_or(100, |s| s.experience_multiplier);
         let (name, max_hp, damage) = match (stats, lvl_stats) {
             (Some(st), Some((life, dmg))) => (st.name, ((life * st.life_multiplier / 100).max(1)) as i32, (dmg * st.damage_multiplier as f64 / 100.0).round().max(1.0) as i32),
             (Some(st), None) => (st.name, (ENEMY_HP as i64 * st.life_multiplier / 100) as i32, ENEMY_DAMAGE),
@@ -1348,7 +1353,7 @@ fn show_play(
             list.into_iter().map(|c| c.unwrap_or(Clip { tracks: Vec::new(), fps: 30.0, length: 1.0 })).collect::<Vec<_>>()
         }).unwrap_or_default();
         eprintln!("monster {name}: level {level} life {max_hp} damage {damage}");
-        Enemy { mesh: m, base, name, max_hp, damage, clips, rig, state: 0, state_time: 0.0, home: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)) + glam::Vec2::new(0.0, (n as f32 - (pack as f32 - 1.0) / 2.0) * 160.0), dead_time: 0.0, mults, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)) + glam::Vec2::new(0.0, (n as f32 - (pack as f32 - 1.0) / 2.0) * 160.0), heading: 0.0, hp: max_hp, cooldown: 0.0 }
+        Enemy { mesh: m, base, name, max_hp, damage, clips, rig, state: 0, state_time: 0.0, home: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)) + glam::Vec2::new(0.0, (n as f32 - (pack as f32 - 1.0) / 2.0) * 160.0), dead_time: 0.0, mults, xp_mult, pos: start + std::env::var("POE2_ENEMY_OFFSET").ok().and_then(|v| v.split_once(',').and_then(|(a, b)| Some(glam::Vec2::new(a.parse().ok()?, b.parse().ok()?)))).unwrap_or(glam::Vec2::new(450.0, 0.0)) + glam::Vec2::new(0.0, (n as f32 - (pack as f32 - 1.0) / 2.0) * 160.0), heading: 0.0, hp: max_hp, cooldown: 0.0 }
     }).collect();
     poe2_bundles::room::recompute_bbox(&mut all);
     let center = mesh_center(&all);
