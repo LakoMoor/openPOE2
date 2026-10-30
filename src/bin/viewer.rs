@@ -691,6 +691,9 @@ fn screenshot_world(
             play.attack = Some(0.0);
         }
         play.step(1.0 / 60.0, &mut cam, i as f32 / 60.0, &mut renderer);
+        if i % 30 == 0 && std::env::var_os("POE2_DEBUG").is_some() {
+            eprintln!("walk: t {:.1} pos ({:.0}, {:.0}) ground z {:.1}", i as f32 / 60.0, play.pos.x, play.pos.y, play.ground_z(play.pos));
+        }
     }
     if !play.walkable.is_empty() {
         eprintln!("zone: player at ({:.0}, {:.0}), on ground: {}", play.pos.x, play.pos.y, play.on_ground(play.pos));
