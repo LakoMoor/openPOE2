@@ -75,6 +75,32 @@ pub fn level_stats(idx: &Index, dir: &Path, schema_dir: &Path, level: usize) -> 
     Ok((life, dmg))
 }
 
+/// Experience a monster of `level` is worth (`DefaultMonsterStats.Experience`, row 0 is level 1).
+pub fn level_xp(idx: &Index, dir: &Path, schema_dir: &Path, level: usize) -> Result<i64> {
+    let schema = Schema::load(schema_dir)?;
+    let bytes = idx.read_file(dir, "data/balance/defaultmonsterstats.datc64")?;
+    let table = Table::parse(&bytes)?;
+    let ts = schema.table("defaultmonsterstats").context("no schema for defaultmonsterstats")?;
+    let row = table.decode_row(ts, level.saturating_sub(1).min(table.rows.saturating_sub(1)))?;
+    Ok(row.iter().find_map(|(k, v)| match (k.as_str(), v) { ("Experience", Value::Int(i)) => Some(*i), _ => None }).unwrap_or(0))
+}
+
+/// Total experience needed to reach each player level (`ExperienceLevels`, index 0 = level 1).
+/// Read raw: 16-byte rows of (Id offset u64, Level i32, Experience u32) after a 4-byte row count;
+/// the table has no usable community schema.
+pub fn experience_levels(idx: &Index, dir: &Path, _schema_dir: &Path) -> Result<Vec<i64>> {
+    let b = idx.read_file(dir, "data/balance/experiencelevels.datc64")?;
+    let n = u32::from_le_bytes(b.get(0..4).context("short table")?.try_into()?) as usize;
+    let mut rows: Vec<(i32, i64)> = (0..n)
+        .filter_map(|i| {
+            let r = b.get(4 + i * 16..4 + i * 16 + 16)?;
+            Some((i32::from_le_bytes(r[8..12].try_into().ok()?), u32::from_le_bytes(r[12..16].try_into().ok()?) as i64))
+        })
+        .collect();
+    rows.sort();
+    Ok(rows.into_iter().map(|r| r.1).collect())
+}
+
 /// Starting values of a player class from the `Characters` table.
 #[derive(Debug, Clone)]
 pub struct PlayerStats {

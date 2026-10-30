@@ -843,6 +843,12 @@ struct Play {
     run_mult: f32,
     /// Base (life, damage) of a monster by level from DefaultMonsterStats, and the kills so far.
     level_table: Vec<(i64, f64)>,
+    /// Experience: monster worth per level, player thresholds (`ExperienceLevels`), current xp, level and life gained per level.
+    monster_xp: Vec<i64>,
+    xp_table: Vec<i64>,
+    xp: i64,
+    player_level: usize,
+    life_per_level: i32,
     kills: usize,
     kill_count: usize,
     /// Weapons Tab cycles through, and the one in hand.
@@ -976,6 +982,16 @@ impl Play {
                 // third kill hands out the next weapon of the list, an invented rule.
                 if drop_roll {
                     self.kill_count += 1;
+                    if let Some(&gain) = self.monster_xp.get(self.kills.min(self.monster_xp.len().saturating_sub(1))) {
+                        self.xp += gain;
+                        eprintln!("xp: +{gain} (monster level {}), total {}", self.kills + 1, self.xp);
+                        while self.xp_table.get(self.player_level).is_some_and(|&need| self.xp >= need) {
+                            self.player_level += 1;
+                            self.player_max_hp += self.life_per_level;
+                            self.player_hp = self.player_max_hp;
+                            eprintln!("level up: level {}, life {}", self.player_level, self.player_max_hp);
+                        }
+                    }
                     if self.kill_count % 3 == 0 && !self.weapons.is_empty() {
                         self.next_weapon();
                         self.status = format!("loot (invented rule): {}", self.status);
@@ -1385,8 +1401,17 @@ fn show_play(
     let level_table: Vec<(i64, f64)> = std::env::var_os("POE2_SCHEMA")
         .map(|sd| (1..=20).filter_map(|l| poe2_bundles::monster::level_stats(idx, dir, std::path::Path::new(&sd), l).ok()).collect())
         .unwrap_or_default();
+    let (monster_xp, xp_table): (Vec<i64>, Vec<i64>) = match std::env::var_os("POE2_SCHEMA") {
+        Some(sd) => {
+            let sd = std::path::Path::new(&sd);
+            ((1..=20).filter_map(|l| poe2_bundles::monster::level_xp(idx, dir, sd, l).ok()).collect(), poe2_bundles::monster::experience_levels(idx, dir, sd).unwrap_or_default())
+        }
+        None => Default::default(),
+    };
+    let player_level = std::env::var("POE2_LEVEL").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).max(1);
+    let life_per_level = poe2_bundles::monster::template_value(idx, dir, "life_per_level").unwrap_or(0) as i32;
     eprintln!("terrain: height under start {:.1}, base {:.1}", heights.iter().find_map(|h| h.sample(start.x, start.y, 250.0 / 23.0)).unwrap_or(f32::NAN), base_z);
-    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, heights, base_z, enemies, hit_done: false, walkable, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, kills: 0, kill_count: 0, weapons, weapon_ix: 0, held_ranges, start_hit: pstats.1, start_swing: pstats.2, status: String::new() })
+    Some(Play { keys: [false; 4], pos: start, heading: 0.0, center, running: false, attack: None, clip_time: 0.0, clip: 0, obstacles, heights, base_z, enemies, hit_done: false, walkable, player_hp: pstats.0, player_max_hp: pstats.0, hit_range: pstats.1, swings: 0, swing_secs: pstats.2, roll: None, roll_secs: pstats.3, roll_wanted: false, run_mult, level_table, xp: std::env::var("POE2_XP").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| xp_table.get(player_level - 1).copied().unwrap_or(0)), monster_xp, xp_table, player_level, life_per_level, kills: 0, kill_count: 0, weapons, weapon_ix: 0, held_ranges, start_hit: pstats.1, start_swing: pstats.2, status: String::new() })
 }
 
 impl ApplicationHandler for App {
